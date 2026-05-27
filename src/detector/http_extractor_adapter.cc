@@ -29,11 +29,9 @@ std::string HttpExtractorAdapter::toLower(std::string_view sv) {
 // 构造
 // ============================================================================
 
-HttpExtractorAdapter::HttpExtractorAdapter(std::shared_ptr<HttpAccessEvent> event)
-    : event_(std::move(event)) {
-    if (!event_) {
-        throw std::runtime_error("HttpExtractorAdapter: event is null");
-    }
+HttpExtractorAdapter::HttpExtractorAdapter(const HttpAccessEvent& event)
+    : event_(&event) {
+    // event 由调用方保证非空
 
     buildRequestHeaderIndex();
     buildResponseHeaderIndex();
