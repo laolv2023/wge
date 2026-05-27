@@ -14,6 +14,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -107,10 +108,9 @@ struct ProducerConfig {
  *   cfg.topic = "wge-alert";
  *   cfg.transactional_id = "wge-detector-01";
  *
- *   auto consumer_metadata = consumer.groupMetadata();
  *   auto producer = std::make_shared<AlertProducer>(cfg);
  *   producer->initTransactions();
- *   producer->start(consumer_metadata);
+ *   producer->flushLoop([&consumer]() { return consumer.groupMetadata(); });
  *
  *   producer->sendAlert(alert_event);
  *   // ...
@@ -172,12 +172,12 @@ public:
      * 在独立线程中运行，持续从内部队列消费告警，
      * 以事务方式批量发送到 Kafka。
      *
-     * @param group_metadata Consumer group metadata，用于
-     *                       send_offsets_to_transaction (CTP 模式)。
-     *                       若为 nullptr，跳过 offset 提交。
-     * @note 调用方需确保 group_metadata 在 flushLoop 运行期间有效。
+     * @param group_metadata_provider 回调函数，每次事务前调用以获取最新的
+     *                                Consumer group metadata（避免 rebalance 后过时）。
+     *                                若返回 nullptr，跳过 offset 提交。
+     * @note 每次事务前都会调用该回调，确保 rebalance 后 metadata 不失效。
      */
-    void flushLoop(RdKafka::ConsumerGroupMetadata* group_metadata);
+    void flushLoop(std::function<RdKafka::ConsumerGroupMetadata*()> group_metadata_provider);
 
     /**
      * @brief 优雅关闭
@@ -210,7 +210,7 @@ private:
     /**
      * @brief 内部 flush 循环
      */
-    void flushLoopImpl(RdKafka::ConsumerGroupMetadata* group_metadata);
+    void flushLoopImpl(std::function<RdKafka::ConsumerGroupMetadata*()> group_metadata_provider);
 
     /**
      * @brief 设置 SASL 配置
