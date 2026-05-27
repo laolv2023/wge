@@ -1,6 +1,18 @@
 /**
  * @file field_applier.cc
- * @brief FieldApplier 实现
+ * @brief FieldApplier 实现 — Protobuf 字段写入器
+ *
+ * ## 模块职责
+ * FieldApplier 通过 protobuf 反射 API 将提取的字段值写入 HttpAccessEvent。
+ *
+ * ## 关键设计
+ * - **Protobuf 反射**: 使用 google::protobuf::Reflection 和 FieldDescriptor
+ *   在运行时按字段名称查找并设置 protobuf 字段，避免为每个字段写硬编码 setter
+ * - **类型安全**: 根据 FieldType 枚举选择正确的 setter：
+ *   String / Int32 / Int64 / Bytes / Bool
+ * - **类型兼容**: 对整数类型使用 from_chars 解析字符串，对 uint 类型校验非负
+ * - **Bytes 解码**: 支持 raw / base64 / hex 三种编码
+ * - **时间戳解析**: 支持 Unix epoch（秒/毫秒/微秒）、ISO 8601、Nginx 格式
  */
 
 #include "mapper/field_applier.h"
@@ -87,6 +99,13 @@ namespace {
 
 /**
  * @brief 通过 protobuf 反射查找字段描述符
+ *
+ * 使用 google::protobuf::Message::GetDescriptor() 获取元数据，
+ * 然后通过 FindFieldByName 查找字段。
+ *
+ * @param msg Protobuf 消息实例
+ * @param field_name 字段名（如 "request_uri"）
+ * @return 字段描述符指针，未找到返回 nullptr
  */
 const google::protobuf::FieldDescriptor* findFieldDescriptor(
     const google::protobuf::Message& msg, const std::string& field_name) {
@@ -305,8 +324,9 @@ int64_t FieldApplier::parseTimestamp(
     const std::vector<std::string>& formats) const {
     if (raw.empty()) return -1;
 
-    // 策略: 优先数字检测，然后按格式尝试
-    // 检查是否全为数字
+    // 策略: 优先数字检测（最快），然后按配置格式尝试，最后回退到常见格式
+
+    // 检测是否全为数字（快速路径：直接 from_chars）
     bool all_digits = !raw.empty();
     for (char c : raw) {
         if (c < '0' || c > '9') {
@@ -317,37 +337,37 @@ int64_t FieldApplier::parseTimestamp(
 
     if (all_digits) {
         if (raw.size() == 13) {
-            // Unix epoch milliseconds
+            // Unix epoch milliseconds (13 位: 如 1705313400000)
             int64_t ms;
             auto [ptr, ec] =
                 std::from_chars(raw.data(), raw.data() + raw.size(), ms);
             if (ec == std::errc{}) return ms;
         }
         if (raw.size() == 10) {
-            // Unix epoch seconds
+            // Unix epoch seconds (10 位: 如 1705313400)
             int64_t sec;
             auto [ptr, ec] =
                 std::from_chars(raw.data(), raw.data() + raw.size(), sec);
-            if (ec == std::errc{}) return sec * 1000;
+            if (ec == std::errc{}) return sec * 1000;  // 秒 → 毫秒
         }
         if (raw.size() == 16) {
-            // Unix epoch microseconds
+            // Unix epoch microseconds (16 位: 如 1705313400000000)
             int64_t us;
             auto [ptr, ec] =
                 std::from_chars(raw.data(), raw.data() + raw.size(), us);
-            if (ec == std::errc{}) return us / 1000;
+            if (ec == std::errc{}) return us / 1000;   // 微秒 → 毫秒
         }
     }
 
-    // 如果有明确的格式字符串，使用 strptime 尝试
+    // 如果有明确的格式字符串，使用 strptime 尝试（strptime 支持 %Y %m %d 等格式符）
     if (!formats.empty()) {
         for (const auto& fmt : formats) {
             std::tm tm = {};
             char* end = strptime(raw.c_str(), fmt.c_str(), &tm);
-            if (end != nullptr && *end == '\0') {
-                tm.tm_isdst = -1;
+            if (end != nullptr && *end == '\0') {  // 完整匹配
+                tm.tm_isdst = -1;  // 让系统判断是否为夏令时
                 errno = 0;
-                auto epoch = timegm(&tm);
+                auto epoch = timegm(&tm);  // UTC 时间（非本地时间）
                 if (errno == 0) {
                     return static_cast<int64_t>(epoch) * 1000;
                 }
@@ -356,9 +376,7 @@ int64_t FieldApplier::parseTimestamp(
     }
 
     // 回退: ISO 8601 检测
-    // 2024-01-15T10:30:00.123Z
-    // 2024-01-15T10:30:00+08:00
-    // 2024-01-15 10:30:00
+    // 格式: 2024-01-15T10:30:00.123Z 或 2024-01-15T10:30:00+08:00
     if (raw.size() >= 19 && raw[4] == '-' && raw[7] == '-') {
         std::tm tm = {};
         int ms = 0;
@@ -368,24 +386,22 @@ int64_t FieldApplier::parseTimestamp(
 
         int parsed = 0;
         if (raw.size() >= 23 && raw[19] == '.') {
-            // 带毫秒
+            // 带毫秒: 2024-01-15T10:30:00.123+08:00
             parsed = std::sscanf(
                 raw.c_str(), "%4d-%2d-%2d%c%2d:%2d:%2d.%3d%c%2d:%2d",
                 &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &sep,
                 &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &ms,
                 &tz_sign, &tz_h, &tz_m);
         } else {
-            // 无毫秒
+            // 无毫秒: 2024-01-15T10:30:00Z
             char tz_str[8] = {};
             parsed = std::sscanf(
                 raw.c_str(), "%4d-%2d-%2d%c%2d:%2d:%2d%7s",
                 &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &sep,
                 &tm.tm_hour, &tm.tm_min, &tm.tm_sec, tz_str);
             if (parsed == 7 && tz_str[0] != '\0') {
-                // 解析时区后缀
                 if (tz_str[0] == 'Z' || tz_str[0] == 'z') {
-                    // UTC，已正确
-                    parsed = 7;
+                    parsed = 7;  // UTC 时区，无需额外调整
                 } else {
                     std::sscanf(tz_str, "%c%2d:%2d", &tz_sign, &tz_h, &tz_m);
                     parsed = 10;
@@ -394,15 +410,16 @@ int64_t FieldApplier::parseTimestamp(
         }
 
         if (parsed >= 6) {
-            tm.tm_year -= 1900;
-            tm.tm_mon -= 1;
+            tm.tm_year -= 1900;  // tm_year 是 1900 年起的偏移
+            tm.tm_mon -= 1;       // tm_mon 是 0-11
             tm.tm_isdst = -1;
 
             errno = 0;
-            auto epoch = timegm(&tm);
+            auto epoch = timegm(&tm);  // UTC 秒
             if (errno == 0) {
                 int64_t result = static_cast<int64_t>(epoch) * 1000 + ms;
 
+                // 减去时区偏移（因为 timegm 假设 UTC 输入）
                 if (parsed >= 9) {
                     int tz_offset = tz_h * 3600 + tz_m * 60;
                     if (tz_sign == '-') tz_offset = -tz_offset;
@@ -426,6 +443,7 @@ int64_t FieldApplier::parseTimestamp(
                         &tm.tm_hour, &tm.tm_min, &tm.tm_sec,
                         &tz_sign_c, &tz_h, &tz_m);
         if (parsed == 9) {
+            // 月份缩写 → 数字
             static const char* months[] = {"Jan", "Feb", "Mar", "Apr",
                                            "May", "Jun", "Jul", "Aug",
                                            "Sep", "Oct", "Nov", "Dec"};
@@ -454,7 +472,7 @@ int64_t FieldApplier::parseTimestamp(
     }
 
     spdlog::warn("FieldApplier::parseTimestamp: unparseable: '{}'", raw);
-    return -1;
+    return -1;  // 解析失败
 }
 
 // ============================================================================
