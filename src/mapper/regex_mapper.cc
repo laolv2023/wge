@@ -6,6 +6,7 @@
 #include "mapper/regex_mapper.h"
 
 #include <charconv>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -108,13 +109,7 @@ std::expected<void, std::string> RegexMapper::compile(
     const std::string& pattern) {
     auto result = getOrCompile(pattern);
     if (!result) return std::unexpected(result.error());
-
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    compiled_regex_ = std::make_unique<re2::RE2>(pattern);
-    if (!compiled_regex_->ok()) {
-        return std::unexpected(
-            std::string("RE2 compilation failed: ") + compiled_regex_->error());
-    }
+    compiled_regex_ = *result;
     return {};
 }
 
@@ -221,9 +216,9 @@ RegexMapper::fullMatchAndExtract(
 
     // 分配匹配数组
     int num_groups = regex.NumberOfCapturingGroups();
-    if (num_groups <= 0) {
+    if (num_groups < 0) {
         return std::unexpected(
-            std::string("Regex has no capturing groups"));
+            std::string("Regex error: invalid number of capturing groups"));
     }
 
     std::vector<re2::StringPiece> matches(
@@ -331,7 +326,12 @@ std::expected<std::string, std::string> RegexMapper::grokToRegex(
 
         // 去除首尾空格
         auto trim = [](std::string& s) {
-            s.erase(0, s.find_first_not_of(" \t\n\r"));
+            size_t first = s.find_first_not_of(" \t\n\r");
+            if (first == std::string::npos) {
+                s.clear();
+                return;
+            }
+            s.erase(0, first);
             s.erase(s.find_last_not_of(" \t\n\r") + 1);
         };
         trim(pattern_name);
@@ -415,8 +415,9 @@ int64_t RegexMapper::parseTimestamp(
             tm.tm_mon -= 1;
             tm.tm_isdst = -1;
 
+            errno = 0;
             auto time_epoch = timegm(&tm);
-            if (time_epoch != -1) {
+            if (errno == 0) {
                 int64_t result = static_cast<int64_t>(time_epoch) * 1000 + ms;
 
                 // 调整时区
@@ -438,8 +439,9 @@ int64_t RegexMapper::parseTimestamp(
             tm2.tm_year -= 1900;
             tm2.tm_mon -= 1;
             tm2.tm_isdst = -1;
+            errno = 0;
             auto time_epoch = timegm(&tm2);
-            if (time_epoch != -1) {
+            if (errno == 0) {
                 return static_cast<int64_t>(time_epoch) * 1000;
             }
         }
@@ -474,8 +476,9 @@ int64_t RegexMapper::parseTimestamp(
                 tm.tm_year -= 1900;
                 tm.tm_isdst = -1;
 
+                errno = 0;
                 auto time_epoch = timegm(&tm);
-                if (time_epoch != -1) {
+                if (errno == 0) {
                     int64_t result = static_cast<int64_t>(time_epoch) * 1000;
                     int tz_offset = tz_h * 3600 + tz_m * 60;
                     if (tz_sign_c == '-') tz_offset = -tz_offset;
@@ -496,8 +499,9 @@ int64_t RegexMapper::parseTimestamp(
             tm.tm_year -= 1900;
             tm.tm_mon -= 1;
             tm.tm_isdst = -1;
+            errno = 0;
             auto time_epoch = timegm(&tm);
-            if (time_epoch != -1) {
+            if (errno == 0) {
                 return static_cast<int64_t>(time_epoch) * 1000;
             }
         }
