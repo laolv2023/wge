@@ -245,13 +245,17 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
         return 0;
     }
 
+    // 转为逐个标记模式 — 用 vector<bool> 记录每行补发状态
+    std::vector<bool> relayed_flags(lines.size(), false);
     int64_t relayed = 0;
 
     // 逐行反序列化并补发
-    for (auto& json_line : lines) {
+    for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx) {
         if (stopped_.load(std::memory_order_acquire)) {
             break;
         }
+
+        const auto& json_line = lines[line_idx];
 
         // 反序列化 JSON → WgeAlertEvent
         auto alert = std::make_shared<WgeAlertEvent>();
@@ -282,6 +286,7 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
         // 补发到 AlertProducer
         try {
             producer_.sendAlert(alert);
+            relayed_flags[line_idx] = true;
             ++relayed;
             SPDLOG_DEBUG("WalRelay: relayed alert_id={}", alert->alert_id());
         } catch (const std::exception& e) {
@@ -299,12 +304,14 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
                         file_path, std::strerror(errno));
         }
     } else {
-        // 部分补发失败 — 重写文件，只保留失败的条目
+        // 部分补发失败 — 重写文件，只保留未补发的条目
         std::string tmp_path = file_path + ".tmp";
         std::ofstream outfile(tmp_path, std::ios::trunc);
         if (outfile.is_open()) {
-            for (size_t i = relayed; i < lines.size(); ++i) {
-                outfile << lines[i] << '\n';
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (!relayed_flags[i]) {
+                    outfile << lines[i] << '\n';
+                }
             }
             outfile.close();
 
