@@ -1,6 +1,21 @@
 /**
  * @file worker_pool.cc
  * @brief WgeWorkerPool 实现 — WGE 检测线程池
+ *
+ * ## 模块职责
+ * 实现 WGE 安全检测的核心调度逻辑：
+ * - 管理固定数量的 worker 线程，从有界阻塞队列消费检测任务
+ * - 对每个 HttpAccessEvent 执行 WGE 全流程检测（connection → URI → headers → body）
+ * - 通过 AlertProducer 将检测结果（告警）发送到 Kafka
+ * - 支持协作式超时、优雅停止和队列排空
+ *
+ * ## 关键设计决策
+ * - **协作式超时**: 在 detect() 各步骤间插入 timed_out() 检查，
+ *   而非使用 std::future + wait_for（后者需要额外的线程/复杂度）
+ * - **有界队列**: 使用两个 condition_variable（not_empty / not_full）
+ *   实现背压，防止生产者速度远超消费者导致 OOM
+ * - **swap-then-process**: stop() 排空时先 swap 到局部变量释放锁，
+ *   再逐个处理，避免持锁调用可能阻塞的 detect/sendAlert
  */
 
 #include "detector/worker_pool.h"
@@ -32,20 +47,21 @@ WgeWorkerPool::WgeWorkerPool(const wge::Engine& engine,
                              AlertProducer& producer,
                              metrics::Metrics& metrics,
                              const WorkerConfig& config)
-    : engine_(engine)
-    , producer_(producer)
-    , metrics_(metrics)
-    , config_(config) {
+    : engine_(engine)       // WGE 引擎引用，外部保证生命周期
+    , producer_(producer)   // 告警生产者引用
+    , metrics_(metrics)     // Metrics 单例引用
+    , config_(config) {     // 拷贝配置（后续可能修改 worker_threads 等）
 
-    // 自动检测线程数
+    // 自动检测线程数：0 表示使用硬件并发数
     if (config_.worker_threads <= 0) {
         config_.worker_threads = static_cast<int>(
             std::thread::hardware_concurrency());
         if (config_.worker_threads <= 0) {
-            config_.worker_threads = 4;  // 安全回退
+            config_.worker_threads = 4;  // 检测失败的安全回退值
         }
     }
 
+    // 补全默认队列容量
     if (config_.max_pending_tasks <= 0) {
         config_.max_pending_tasks = 1024;
     }
@@ -57,8 +73,9 @@ WgeWorkerPool::WgeWorkerPool(const wge::Engine& engine,
 
 WgeWorkerPool::~WgeWorkerPool() {
     try {
-        stop();
+        stop();  // 确保线程安全退出，排空剩余任务
     } catch (const std::exception& e) {
+        // 析构函数中不抛出异常，记录日志即可
         SPDLOG_ERROR("WgeWorkerPool destructor error: {}", e.what());
     } catch (...) {
         SPDLOG_ERROR("WgeWorkerPool destructor: unknown error");
@@ -70,14 +87,18 @@ WgeWorkerPool::~WgeWorkerPool() {
 // ============================================================================
 
 void WgeWorkerPool::start() {
+    // CAS 防护：确保只启动一次，重复调用抛异常
     if (started_.exchange(true, std::memory_order_acq_rel)) {
         throw std::runtime_error("WgeWorkerPool::start: already started");
     }
 
+    // 清除停止标志（支持 stop() 后重新 start() 的场景）
     stopped_.store(false, std::memory_order_release);
 
+    // 预分配 vector 容量，避免创建线程时重新分配导致引用失效
     workers_.reserve(static_cast<size_t>(config_.worker_threads));
     for (int i = 0; i < config_.worker_threads; ++i) {
+        // emplace_back: 直接在 vector 中构造 thread，参数为成员函数指针 + this + worker_id
         workers_.emplace_back(&WgeWorkerPool::workerLoop, this, i);
     }
 
@@ -88,20 +109,22 @@ void WgeWorkerPool::start() {
 }
 
 void WgeWorkerPool::stop() {
+    // CAS 实现幂等：只有第一个调用者执行停止逻辑，后续调用直接返回
     bool expected = false;
     if (!stopped_.compare_exchange_strong(expected, true,
                                           std::memory_order_acq_rel,
                                           std::memory_order_relaxed)) {
-        return;  // 已停止
+        return;  // 已停止或正在停止，直接返回
     }
 
     SPDLOG_INFO("WgeWorkerPool::stop: signaling all workers to stop");
 
-    // 唤醒所有等待的 worker 线程
+    // 唤醒所有等待中的 worker 线程和 submitBatch 调用者
+    // 必须先设置 stopped_ 再 notify，否则存在 TOCTOU 竞态
     not_empty_.notify_all();
     not_full_.notify_all();
 
-    // 等待所有 worker 线程退出
+    // 等待所有 worker 线程退出（join 阻塞直到线程函数返回）
     for (auto& worker : workers_) {
         if (worker.joinable()) {
             worker.join();
@@ -109,25 +132,26 @@ void WgeWorkerPool::stop() {
     }
     workers_.clear();
 
-    // 排空并处理队列中剩余的任务
-    // 先将任务移出队列 (swap)，释放锁，再逐个处理，避免持锁调用 detect/sendAlert
+    // ===== 排空队列中剩余的任务 =====
+    // 关键设计：先 swap 到局部变量释放锁，再逐个处理，
+    // 避免持锁调用 detect()/sendAlert()（可能阻塞或死锁）
     std::deque<std::shared_ptr<HttpAccessEvent>> remaining;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        remaining.swap(task_queue_);
+        remaining.swap(task_queue_);  // O(1) 交换，不拷贝元素
         SPDLOG_INFO("WgeWorkerPool::stop: all workers stopped, "
                     "remaining tasks in queue: {}",
                     remaining.size());
     }
 
-    // drain 超时: task_timeout_ms * 2, 防止挂起的 detect() 永久阻塞 shutdown
+    // drain 超时: task_timeout_ms * 2，防止挂起的 detect() 永久阻塞 shutdown
     auto drain_deadline = std::chrono::steady_clock::now()
         + std::chrono::milliseconds(config_.task_timeout_ms * 2);
 
     for (auto& event : remaining) {
         try {
             AlertResult result = detect(*event, drain_deadline);
-            if (result.hasMatches()) {
+            if (result.hasMatches()) {  // 有匹配才生成告警
                 auto alert = AlertBuilder::build(
                     result,
                     event->event_id(),
@@ -142,7 +166,7 @@ void WgeWorkerPool::stop() {
             metrics_.incrementEventsProcessed();
         } catch (const std::exception& e) {
             SPDLOG_ERROR("WgeWorkerPool::stop: drain task failed: {}", e.what());
-            metrics_.incrementEventsDropped();
+            metrics_.incrementEventsDropped();  // 异常视为丢弃
         }
     }
 
@@ -156,6 +180,7 @@ void WgeWorkerPool::stop() {
 int64_t WgeWorkerPool::submitBatch(
     std::vector<std::shared_ptr<HttpAccessEvent>>&& events) {
 
+    // 前置检查：线程池必须已启动
     if (!started_.load(std::memory_order_acquire)) {
         throw std::runtime_error("WgeWorkerPool::submitBatch: pool not started");
     }
@@ -170,19 +195,20 @@ int64_t WgeWorkerPool::submitBatch(
     for (auto& event : events) {
         if (!event) {
             SPDLOG_WARN("WgeWorkerPool::submitBatch: null event skipped");
-            continue;
+            continue;  // 跳过空指针，不中断批量提交
         }
 
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
 
-            // 有界队列: 满时阻塞等待
+            // 有界队列满时阻塞等待：wait 会在 predicate 为 true 或 spurious wakeup 时返回
+            // predicate 条件：队列未满 或 已请求停止
             not_full_.wait(lock, [this, max_capacity] {
                 return task_queue_.size() < max_capacity ||
                        stopped_.load(std::memory_order_acquire);
             });
 
-            // 若已停止则不继续提交
+            // 检查停止标志：若已停止则放弃剩余 events，避免无限阻塞
             if (stopped_.load(std::memory_order_acquire)) {
                 SPDLOG_WARN("WgeWorkerPool::submitBatch: pool stopped, "
                             "{} events not submitted",
@@ -193,11 +219,12 @@ int64_t WgeWorkerPool::submitBatch(
             task_queue_.push_back(std::move(event));
             ++submitted;
         }
+        // 锁外通知：减少锁争用（notify_one 不需要持锁）
 
-        not_empty_.notify_one();
+        not_empty_.notify_one();  // 通知一个等待的 worker 有新任务
     }
 
-    // 更新 metrics
+    // 更新 metrics（非关键路径，relaxed 即可）
     metrics_.worker_pool_pending.store(
         static_cast<int64_t>(pendingCount()), std::memory_order_relaxed);
 
@@ -224,18 +251,21 @@ size_t WgeWorkerPool::activeCount() const {
 void WgeWorkerPool::workerLoop(int worker_id) {
     SPDLOG_DEBUG("WgeWorkerPool: worker {} started", worker_id);
 
+    // 主循环：在收到停止信号前持续从队列取任务处理
     while (!stopped_.load(std::memory_order_acquire)) {
         std::shared_ptr<HttpAccessEvent> event;
 
-        // ---- 从队列取任务 ----
+        // ---- 从有界队列取任务 (消费者端) ----
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
 
+            // 队列为空时阻塞等待，直到有新任务或收到停止信号
             not_empty_.wait(lock, [this] {
                 return !task_queue_.empty() ||
                        stopped_.load(std::memory_order_acquire);
             });
 
+            // 停止 + 空队列 = 安全退出
             if (stopped_.load(std::memory_order_acquire) && task_queue_.empty()) {
                 break;
             }
@@ -244,21 +274,23 @@ void WgeWorkerPool::workerLoop(int worker_id) {
                 event = std::move(task_queue_.front());
                 task_queue_.pop_front();
 
-                // 通知 submitBatch 可以继续写入
+                // 通知 submitBatch：队列有空位了（生产者可继续写入）
                 not_full_.notify_one();
             }
         }
 
         if (!event) {
-            continue;
+            continue;  // 空指针防护，理论上不应出现
         }
 
-        // ---- Per-task 超时检测 (cooperative) ----
+        // ---- Per-task 超时检测 (cooperative / 协作式) ----
+        // 增加活跃计数，用于 metrics 和监控
         active_workers_.fetch_add(1, std::memory_order_relaxed);
         metrics_.worker_pool_active.store(
             static_cast<int64_t>(active_workers_.load(std::memory_order_relaxed)),
             std::memory_order_relaxed);
 
+        // 计算本次任务的绝对截止时间
         auto timeout = std::chrono::milliseconds(config_.task_timeout_ms);
         auto deadline = std::chrono::steady_clock::now() + timeout;
 
@@ -273,7 +305,7 @@ void WgeWorkerPool::workerLoop(int worker_id) {
                             event->event_id());
                 metrics_.incrementEventsDropped();
             } else if (result.hasMatches()) {
-                // 构建告警并发送
+                // 有规则匹配 → 构建告警并发送
                 auto alert = AlertBuilder::build(
                     result,
                     event->event_id(),
@@ -287,19 +319,22 @@ void WgeWorkerPool::workerLoop(int worker_id) {
                 metrics_.incrementAlertsProduced();
                 metrics_.incrementEventsProcessed();
             } else {
+                // 正常检测无匹配
                 metrics_.incrementEventsProcessed();
             }
 
         } catch (const std::exception& e) {
+            // detect() 异常视为该事件检测失败，丢弃并继续处理下一条
             SPDLOG_ERROR("WgeWorkerPool: worker {} detect failed: {} "
                          "(event_id={})",
                          worker_id, e.what(), event->event_id());
             metrics_.incrementEventsDropped();
         }
 
+        // 任务完成，减少活跃计数
         active_workers_.fetch_sub(1, std::memory_order_relaxed);
 
-        // 更新 pending metrics
+        // 更新队列待处理数 metrics
         metrics_.worker_pool_pending.store(
             static_cast<int64_t>(pendingCount()), std::memory_order_relaxed);
     }
@@ -314,39 +349,44 @@ void WgeWorkerPool::workerLoop(int worker_id) {
 AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
                                    std::chrono::steady_clock::time_point deadline) {
     AlertResult result;
-    result.event_id = event.event_id();
-    result.timestamp_ms = event.timestamp_ms();
+    result.event_id = event.event_id();        // 关联原始事件 ID
+    result.timestamp_ms = event.timestamp_ms(); // 保留原始时间戳
 
-    // 辅助宏：检查是否超时
+    // 辅助 Lambda：检查当前时间是否超过 deadline（协作式超时）
+    // deadline == max() 表示无超时限制（drain 时使用此值）
     auto timed_out = [&deadline]() -> bool {
         return deadline != std::chrono::steady_clock::time_point::max() &&
                std::chrono::steady_clock::now() > deadline;
     };
 
-    // 1. 创建 Transaction
+    // ===== 步骤 1: 创建 WGE Transaction (检测会话) =====
+    // Transaction 是 WGE 引擎的核心抽象，封装一次完整的 HTTP 检测上下文
     auto tx = engine_.makeTransaction();
     if (!tx) {
         throw std::runtime_error("WgeWorkerPool::detect: makeTransaction returned null");
     }
 
-    // 2. processConnection — 连接信息
+    // ===== 步骤 2: processConnection — 设置连接信息 =====
+    // 传入下游 IP/Port（客户端地址）和上游 IP/Port（源服务器地址）
+    // WGE 引擎可用这些信息进行 IP 黑白名单等检测
     if (!tx->processConnection(
             event.downstream_ip(),
-            static_cast<short>(event.downstream_port()),
+            static_cast<short>(event.downstream_port()),  // uint32 → short 转换
             event.upstream_ip(),
             static_cast<short>(event.upstream_port()))) {
         SPDLOG_WARN("WgeWorkerPool::detect: processConnection failed for event_id={}",
                      event.event_id());
         metrics_.incrementEventsDropped();
-        return result;
+        return result;  // 连接处理失败，返回空结果
     }
-    if (timed_out()) return result;
+    if (timed_out()) return result;  // 协作式超时检查点
 
-    // 3. processUri — URI + Method + HTTP 版本
+    // ===== 步骤 3: processUri — URI + Method + HTTP 版本 =====
     if (!tx->processUri(
-            event.request_uri(),
-            event.request_method(),
-            event.request_version())) {
+            event.request_uri(),       // 如 "/api/v1/users"
+            event.request_method(),    // 如 "GET", "POST"
+            event.request_version()))  // 如 "HTTP/1.1"
+    {
         SPDLOG_WARN("WgeWorkerPool::detect: processUri failed for event_id={}",
                      event.event_id());
         metrics_.incrementEventsDropped();
@@ -354,21 +394,25 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     }
     if (timed_out()) return result;
 
-    // 4. 构建 HttpExtractorAdapter (使用引用，避免 protobuf 深拷贝)
+    // ===== 步骤 4: 构建 HttpExtractorAdapter（延迟创建，避免不必要开销）=====
+    // adapter 构建 header 索引（小写 key → values 映射），供 WGE 规则检索
+    // 使用引用传递 event，避免 protobuf 深拷贝
     HttpExtractorAdapter adapter(event);
 
-    // 5. processRequestHeaders
-    auto req_header_find = adapter.requestHeaderFind();
-    auto req_header_traversal = adapter.requestHeaderTraversal();
+    // ===== 步骤 5: processRequestHeaders =====
+    // 获取 header 查找和遍历的 Lambda（由 adapter 生成）
+    auto req_header_find = adapter.requestHeaderFind();       // O(1) 按 key 查找
+    auto req_header_traversal = adapter.requestHeaderTraversal(); // 遍历所有 headers
 
     if (!tx->processRequestHeaders(
-            req_header_find,
-            req_header_traversal,
-            adapter.requestHeaderCount(),
-            &WgeWorkerPool::onRuleMatch,
-            &result,
-            nullptr,   // AdditionalCondCallback
-            nullptr)) {  // Additional cond user_data
+            req_header_find,          // HeaderFind: 按名称查找 header 值
+            req_header_traversal,     // HeaderTraversal: 遍历所有 headers
+            adapter.requestHeaderCount(), // header 总数
+            &WgeWorkerPool::onRuleMatch,  // 规则匹配回调（静态函数）
+            &result,                      // user_data 传入 result 指针
+            nullptr,   // AdditionalCondCallback: WGE 扩展条件回调（未使用）
+            nullptr))  // Additional cond user_data
+    {
         SPDLOG_WARN("WgeWorkerPool::detect: processRequestHeaders failed for event_id={}",
                      event.event_id());
         metrics_.incrementEventsDropped();
@@ -376,7 +420,8 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     }
     if (timed_out()) return result;
 
-    // 6. processRequestBody
+    // ===== 步骤 6: processRequestBody =====
+    // 仅当请求体非空时才调用（避免不必要的处理）
     if (!event.request_body().empty()) {
         if (!tx->processRequestBody(event.request_body())) {
             SPDLOG_WARN("WgeWorkerPool::detect: processRequestBody failed for event_id={}",
@@ -387,18 +432,19 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     }
     if (timed_out()) return result;
 
-    // 7. processResponseHeaders
+    // ===== 步骤 7: processResponseHeaders =====
     auto resp_header_find = adapter.responseHeaderFind();
     auto resp_header_traversal = adapter.responseHeaderTraversal();
 
     if (!tx->processResponseHeaders(
-            adapter.responseStatusCode(),
-            adapter.responseProtocol(),
+            adapter.responseStatusCode(),   // 如 "200"
+            adapter.responseProtocol(),     // 如 "HTTP/1.1"
             resp_header_find,
             resp_header_traversal,
             adapter.responseHeaderCount(),
-            &WgeWorkerPool::onRuleMatch,
-            &result)) {
+            &WgeWorkerPool::onRuleMatch,    // 同上，规则匹配回调
+            &result))
+    {
         SPDLOG_WARN("WgeWorkerPool::detect: processResponseHeaders failed for event_id={}",
                      event.event_id());
         metrics_.incrementEventsDropped();
@@ -406,7 +452,7 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     }
     if (timed_out()) return result;
 
-    // 8. processResponseBody
+    // ===== 步骤 8: processResponseBody =====
     if (!event.response_body().empty()) {
         if (!tx->processResponseBody(event.response_body())) {
             SPDLOG_WARN("WgeWorkerPool::detect: processResponseBody failed for event_id={}",
@@ -416,46 +462,17 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
         }
     }
 
-    // 9. 提取 matched_variables — 通过 Transaction 的 friend 访问或 public getter
-    //    假设 Transaction 提供 getCurrentMatchedVariables() 方法
-    //    或通过 friend class WgeWorkerPool 访问 matched_variables_
+    // ===== 步骤 9: 提取 matched_variables =====
+    // 从 WGE Transaction 获取匹配变量信息（触发规则的具体变量名和值）
     //
-    //    从 WGE Transaction 中提取 matched_variables 来填充 matched_var_name/value
-    //    注: 若 Transaction 没有 public getter，需要使 WgeWorkerPool 成为 friend class
+    // matched_variables 结构: {variable_name, {transformed_value, original_value}}
+    // - variable_name: WGE 变量名（如 "REQUEST_HEADERS.User-Agent"）
+    // - transformed_value: 经过变换的值（如 URL 解码后）
+    // - original_value: 变换前的原始值
     //
-    //    这里使用 getCurrentMatchedVariables() (假设存在)
-    //    如果只有私有成员，则需要在 wge::Transaction 中声明 friend class WgeWorkerPool
+    // 注: getCurrentMatchedVariables() 为假设的 API，
+    //     实际需根据 WGE SDK 版本适配
 
-    // 注: 以下代码假设 Transaction 提供 getCurrentMatchedVariables() 方法
-    // 若实际 API 不同，调用方需要相应调整
-
-    // ---- 尝试通过 friend 访问 matched_variables_ ----
-    // 如果 Transaction 声明了 friend class WgeWorkerPool:
-    // auto& matched_vars = tx->matched_variables_;
-    // 否则假设有 public getter:
-    // auto& matched_vars = tx->getCurrentMatchedVariables();
-
-    // 由于我们在编译时无法确定 Transaction 是否有 friend 声明，
-    // 使用一个适配方法: 在 onRuleMatch 回调中已经获取了 Rule 信息，
-    // matched_variables 信息需要通过其他方式获取。
-    //
-    // 对于 matched_var_name/value/original，在 LogCallback 触发时
-    // 可以从 Rule 的上下文中推导，但实际 matched variable 信息
-    // 需要通过 Transaction 的接口获取。
-
-    // 这里假设 Transaction 有一个 public getter:
-    // tx->getCurrentMatchedVariables() 返回
-    // const std::vector<std::pair<std::string, std::pair<std::string, std::string>>>&
-    //
-    // 每个元素: {variable_name, {transformed_value, original_value}}
-
-    // 填充 matched_variables 信息到已有的 matched_rules 中
-    // (假设最后一次匹配对应 matched_variables 的最后一个条目)
-
-    // 注: 以下代码为适配层，具体 API 可能不同
-    // 实际部署时需根据 WGE SDK 版本调整
-    // 提取 matched_variables: 通过 getCurrentMatchedVariables() 填充
-    // matched_var_name / matched_var_value / matched_var_original
     const auto& matched_vars = tx->getCurrentMatchedVariables();
     for (size_t i = 0; i < matched_vars.size() && i < result.matched_rules.size(); ++i) {
         result.matched_rules[i].matched_var_name = matched_vars[i].first;
@@ -463,9 +480,9 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
         result.matched_rules[i].matched_var_original = matched_vars[i].second.second;
     }
 
-    // 规则计数
+    // 规则计数（events_processed 在 workerLoop 中已更新，
+    // rule_evaluations 和 rule_matches 在 onRuleMatch 中已更新）
     metrics_.addEventsProcessed(1);
-    // rule_evaluations 和 rule_matches 在 onRuleMatch 中已更新
 
     return result;
 }
@@ -475,6 +492,7 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
 // ============================================================================
 
 void WgeWorkerPool::onRuleMatch(const wge::Rule& rule, void* user_data) {
+    // user_data 是 detect() 中传入的 AlertResult 指针
     if (!user_data) {
         SPDLOG_WARN("WgeWorkerPool::onRuleMatch: null user_data");
         return;
@@ -483,65 +501,72 @@ void WgeWorkerPool::onRuleMatch(const wge::Rule& rule, void* user_data) {
     auto* result = static_cast<AlertResult*>(user_data);
     auto& metrics = metrics::Metrics::instance();
 
-    metrics.incrementRuleEvaluations();
-    metrics.incrementRuleMatches();
+    // 更新 metrics：每次规则匹配都计数
+    metrics.incrementRuleEvaluations(); // 规则被评估次数
+    metrics.incrementRuleMatches();     // 规则命中次数
 
-    // 从 Rule::detail_ 提取规则信息
+    // ===== 从 Rule::detail_ 提取规则元信息 =====
+    // detail_ 是 WGE 规则编译后的元数据，包含 ID、消息、严重级别等
     MatchedRuleInfo info;
 
     if (rule.detail_) {
-        info.rule_id = rule.detail_->id_;
-        info.rule_msg = rule.detail_->msg_;
-        info.severity = rule.detail_->severity_;
-        info.rule_ver = rule.detail_->ver_;
+        info.rule_id = rule.detail_->id_;          // 规则唯一标识
+        info.rule_msg = rule.detail_->msg_;         // 规则描述消息（人类可读）
+        info.severity = rule.detail_->severity_;    // 严重级别枚举值
+        info.rule_ver = rule.detail_->ver_;         // 规则版本号
 
+        // 解析 tags_（逗号分隔字符串 → vector）
         if (rule.detail_->tags_) {
-            // tags_ 可能是逗号分隔字符串或数组
-            // 这里假设是逗号分隔字符串
             std::string tags_str = *rule.detail_->tags_;
             if (!tags_str.empty()) {
                 size_t start = 0;
                 size_t end = 0;
+                // 手动分割逗号分隔的标签字符串，避免引入 boost 等依赖
                 while ((end = tags_str.find(',', start)) != std::string::npos) {
                     info.rule_tags.push_back(tags_str.substr(start, end - start));
                     start = end + 1;
                 }
-                info.rule_tags.push_back(tags_str.substr(start));
+                info.rule_tags.push_back(tags_str.substr(start));  // 最后一个标签
             }
         }
 
-        // 提取拦截信息
+        // ---- 提取拦截/阻断信息 ----
+        // disruptive_: 是否为阻断规则（true=阻断, false=仅检测）
         if (rule.detail_->disruptive_) {
             result->intervened = *rule.detail_->disruptive_;
         }
 
+        // status_: 阻断时返回的 HTTP 状态码
         if (rule.detail_->status_) {
             result->response_code = *rule.detail_->status_;
         }
 
+        // redirect_: 阻断时重定向的目标 URL
         if (rule.detail_->redirect_) {
             result->redirect_url = *rule.detail_->redirect_;
         }
 
-        // 提取操作符信息
+        // operator_: 触发匹配的操作符名称（如 "@rx", "@contains"）
         if (rule.detail_->operator_) {
             info.operator_name = *rule.detail_->operator_;
         }
     }
 
-    // disruptive_action 推导
+    // ===== 推导 disruptive_action（阻断动作类型）=====
+    // 根据 intervened + response_code + redirect_url 的组合推导
     if (result->intervened) {
         if (result->response_code > 0 && !result->redirect_url.empty()) {
-            result->disruptive_action = "REDIRECT";
+            result->disruptive_action = "REDIRECT";  // 阻断 + 重定向
         } else if (result->response_code > 0) {
-            result->disruptive_action = "DENY";
+            result->disruptive_action = "DENY";      // 阻断 + 返回状态码
         } else {
-            result->disruptive_action = "DROP";
+            result->disruptive_action = "DROP";       // 阻断 + 丢弃连接
         }
     } else {
-        result->disruptive_action = "ALLOW";
+        result->disruptive_action = "ALLOW";          // 仅检测，不阻断
     }
 
+    // 将匹配的规则信息追加到结果列表
     result->matched_rules.push_back(std::move(info));
 }
 
