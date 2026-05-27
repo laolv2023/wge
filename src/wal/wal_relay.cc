@@ -1,6 +1,33 @@
 /**
  * @file wal_relay.cc
  * @brief WalRelay 实现 — WAL 补发中继器
+ *
+ * ## 模块职责
+ * WalRelay 定期扫描 WAL 目录，将之前因 Kafka 不可用而写入本地文件
+ * 的告警重新发送（补发）到 Kafka。
+ *
+ * ## 工作流程
+ * ```
+ * 定时扫描 (scan_interval_ms)
+ *   │
+ *   ├─ 遍历 WAL 目录中的 alert-*.log 文件
+ *   │
+ *   ├─ 跳过最近 2 小时内创建的文件（正在由 WalWriter 写入）
+ *   │
+ *   ├─ 逐行反序列化 JSON → WgeAlertEvent
+ *   │
+ *   ├─ 通过 AlertProducer 补发
+ *   │
+ *   └─ 全部补发成功 → 删除 WAL 文件
+ *       部分失败 → 重写文件，保留未补发条目
+ *       rename 失败 → 将原始文件移到 .failed 后缀
+ * ```
+ *
+ * ## 关键设计
+ * - **安全跳过机制**: 跳过最近 2 小时的文件，防止与 WalWriter 冲突
+ * - **部分失败处理**: 不整文件丢弃，而是重写只保留未成功补发的行
+ * - **原子 rename**: 使用 .tmp → rename 实现安全的文件重写
+ * - **失败标记**: rename 失败时将文件移为 .failed，防止下次扫描重复处理
  */
 
 #include "wal/wal_relay.h"
@@ -29,32 +56,37 @@ namespace wge::kafka::wal {
 
 // ============================================================================
 // 简易 base64 解码 (与 WalWriter 的 base64 编码配对)
+// 在 protobuf JSON util 不可用时，WalWriter 使用 base64(protobuf binary) 格式，
+// WalRelay 需要通过 base64 解码还原 protobuf 消息
 // ============================================================================
 
 namespace {
 
+/// @brief base64 字符 → 6-bit 值映射
 int base64CharValue(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c >= 'A' && c <= 'Z') return c - 'A';       // 0-25
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;  // 26-51
+    if (c >= '0' && c <= '9') return c - '0' + 52;  // 52-61
     if (c == '+') return 62;
     if (c == '/') return 63;
-    return -1;  // invalid
+    return -1;  // 无效字符（包括 '='）
 }
 
+/// @brief base64 解码
+/// 处理标准 base64（含 '=' 填充），忽略空白字符
 std::string base64Decode(const std::string& input) {
     std::string output;
-    output.reserve((input.size() * 3) / 4);
+    output.reserve((input.size() * 3) / 4);  // 预估输出大小
 
-    int val = 0;
-    int valb = -8;
+    int val = 0;    // 累积的 6-bit 值缓冲区
+    int valb = -8;  // 缓冲区中有效位数（负值表示缓冲区为空）
     for (char c : input) {
-        if (c == '=') break;
+        if (c == '=') break;  // padding 后结束
         int v = base64CharValue(c);
-        if (v < 0) continue;  // skip invalid chars (e.g. whitespace)
-        val = (val << 6) + v;
+        if (v < 0) continue;  // 跳过无效字符（如空白）
+        val = (val << 6) + v; // 累积 6 bits
         valb += 6;
-        if (valb >= 0) {
+        if (valb >= 0) {      // 凑满 8 bits 时输出一个字节
             output.push_back(static_cast<char>((val >> valb) & 0xFF));
             valb -= 8;
         }
@@ -131,7 +163,8 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
     SPDLOG_INFO("WalRelay relay loop started");
 
     while (!stopped_.load(std::memory_order_acquire)) {
-        // 等待扫描间隔 (可被打断)
+        // ===== 等待扫描间隔（可被打断） =====
+        // 使用 200ms 粒度检查停止标志，保证停止响应延迟 ≤ 200ms
         auto wait_start = std::chrono::steady_clock::now();
         while (!stopped_.load(std::memory_order_acquire) &&
                std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -144,12 +177,12 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
             break;
         }
 
-        // 扫描 WAL 目录
+        // ===== 扫描 WAL 目录 =====
         DIR* dir = ::opendir(wal_dir_.c_str());
         if (!dir) {
             SPDLOG_WARN("WalRelay: failed to open WAL dir '{}': {}",
                         wal_dir_, std::strerror(errno));
-            continue;
+            continue;  // 目录打开失败，等待下次扫描重试
         }
 
         int64_t total_relayed = 0;
@@ -161,8 +194,8 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
                 break;
             }
 
-            // 匹配 WAL 文件命名: alert-*.log
-            // 最小长度: "alert-" (6) + ".log" (4) = 10
+            // 匹配 WAL 文件命名: alert-YYYYMMDD-HH.log
+            // 最小长度: "alert-" (6) + "YYYYMMDD-HH" (11) + ".log" (4) = 至少 17
             std::string name(entry->d_name);
             if (name.size() < 10 || name.substr(0, 6) != "alert-" ||
                 name.substr(name.size() - 4) != ".log") {
@@ -176,14 +209,14 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
             file_path += name;
 
             // 跳过当前小时的文件 (正在由 WalWriter 写入)
-            // 可以通过比较文件名中的时间戳来判断
-            // 简化实现: 跳过最近 2 小时内创建的文件
+            // 通过文件修改时间判断：最近 2 小时内修改的文件跳过
+            // 这避免了与 WalWriter 的写竞争
 
             struct stat file_stat;
             if (::stat(file_path.c_str(), &file_stat) == 0) {
                 auto now = std::time(nullptr);
                 auto age_sec = now - file_stat.st_mtime;
-                constexpr int64_t kSkipAgeSec = 7200;  // 2 hours
+                constexpr int64_t kSkipAgeSec = 7200;  // 2 小时 = 7200 秒
 
                 if (age_sec < kSkipAgeSec) {
                     SPDLOG_DEBUG("WalRelay: skipping recent file '{}' (age={}s)",
