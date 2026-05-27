@@ -248,7 +248,7 @@ void parseObservability(ObservabilityConfig& cfg, const YAML::Node& node) {
 
 std::string ConfigLoader::substituteEnvVars(const std::string& value) {
     // 匹配 ${VAR_NAME} 或 ${VAR_NAME:-default}
-    static const std::regex env_pattern(R"(\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})");
+    thread_local const std::regex env_pattern(R"(\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})");
 
     std::string result = value;
     std::smatch match;
