@@ -1,6 +1,21 @@
 /**
  * @file wal_writer.cc
- * @brief WalWriter 实现
+ * @brief WalWriter 实现 — Write-Ahead Log 写入器
+ *
+ * ## 模块职责
+ * WalWriter 实现 WAL（预写日志）机制，在发送告警到 Kafka 之前先将告警
+ * 持久化到本地磁盘。当 Kafka 不可用或发送失败时，WalRelay 可从中继文件
+ * 中恢复并补发告警。
+ *
+ * ## 关键设计
+ * - **按小时轮转**: 文件名格式为 alert-YYYYMMDD-HH.log，按小时自动切分新文件
+ * - **强制刷盘**: 每条写入后调用 fflush + fsync，确保崩溃时不丢失数据
+ * - **无缓冲 I/O**: setvbuf(IONBF) 禁用 stdio 缓冲，进一步降低数据丢失风险
+ * - **JSON Lines 格式**: 每行一个 JSON 序列化的 WgeAlertEvent，便于逐行恢复
+ * - **多编码兼容**: 若 protobuf JSON util 不可用，回退为 base64(protobuf binary)
+ *
+ * ## 线程安全
+ * 所有公有方法使用 mutex_ 保护，单写者模型。
  */
 
 #include "wal/wal_writer.h"
@@ -88,22 +103,22 @@ void WalWriter::write(const std::shared_ptr<WgeAlertEvent>& alert) {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 获取当前时间
+    // 获取当前时间，用于按小时轮转 WAL 文件
     auto now = std::time(nullptr);
     std::tm tm_now;
-    ::localtime_r(&now, &tm_now);
+    ::localtime_r(&now, &tm_now);  // 线程安全版本的 localtime
 
-    // 按需轮转
+    // 检查是否需要轮转到新的小时文件
     rotateIfNeeded(tm_now);
 
     if (!current_file_) {
         throw std::runtime_error("WalWriter::write: WAL file not open");
     }
 
-    // 序列化为 JSON 行
+    // 序列化为 JSON 行（单行 JSON，便于逐行恢复）
     std::string json_line = serializeToJsonLine(*alert);
 
-    // 追加写入
+    // 追加写入 — 带短写重试
     size_t written = std::fwrite(json_line.data(), 1, json_line.size(), current_file_);
     if (written != json_line.size()) {
         SPDLOG_ERROR("WalWriter::write: short write: {} of {} bytes written (ferror={})",
@@ -113,7 +128,7 @@ void WalWriter::write(const std::shared_ptr<WgeAlertEvent>& alert) {
                 "WalWriter::write: fwrite failed: " +
                 std::string(std::strerror(errno)));
         }
-        // 非错误原因的短写，重试一次
+        // 非错误原因的短写（如磁盘空间不足但未报错），重试一次
         size_t remaining = json_line.size() - written;
         size_t written2 = std::fwrite(json_line.data() + written, 1, remaining, current_file_);
         if (written2 != remaining) {
@@ -124,17 +139,18 @@ void WalWriter::write(const std::shared_ptr<WgeAlertEvent>& alert) {
         }
     }
 
-    // 追加换行符
+    // 追加换行符（JSON Lines 格式: 每行一个 JSON 对象）
     std::fputc('\n', current_file_);
 
-    // 强制刷盘，确保崩溃时数据不丢失
+    // 强制刷盘: fflush + fsync 确保数据写入物理介质
+    // 这是 WAL 的核心保障 — 崩溃后数据不丢失
     std::fflush(current_file_);
     int fd = ::fileno(current_file_);
     if (fd < 0) {
         SPDLOG_ERROR("WalWriter::write: fileno() returned {} (errno={}), skipping fsync",
                      fd, errno);
     } else {
-        ::fsync(fd);
+        ::fsync(fd);  // 系统调用: 强制将文件内容写入磁盘
     }
 
     SPDLOG_DEBUG("WalWriter: wrote alert_id={} to {} ({} bytes)",
@@ -184,12 +200,12 @@ std::string WalWriter::currentWalFilePath(const std::tm* t) const {
 void WalWriter::rotateIfNeeded(const std::tm& now) {
     std::string expected_path = currentWalFilePath(&now);
 
-    // 相同文件，无需轮转
+    // 相同文件，无需轮转（同一个小时间隔内）
     if (expected_path == current_file_path_ && current_file_) {
         return;
     }
 
-    // 关闭旧文件
+    // 关闭旧文件（跨小时边界时触发）
     if (current_file_) {
         std::fclose(current_file_);
         current_file_ = nullptr;
@@ -197,16 +213,17 @@ void WalWriter::rotateIfNeeded(const std::tm& now) {
                     current_file_path_, expected_path);
     }
 
-    // 打开新文件 (append 模式)
+    // 打开新文件 (append 模式，保留已有内容)
     current_file_path_ = expected_path;
-    current_file_ = std::fopen(current_file_path_.c_str(), "ab");
+    current_file_ = std::fopen(current_file_path_.c_str(), "ab");  // "ab" = 二进制追加
     if (!current_file_) {
         throw std::runtime_error(
             "WalWriter: failed to open WAL file '" +
             current_file_path_ + "': " + std::strerror(errno));
     }
 
-    // 禁用 stdio 缓冲以便崩溃时数据安全
+    // 禁用 stdio 缓冲（_IONBF = 无缓冲），确保每字节立即写入内核
+    // 配合 fflush + fsync 实现崩溃安全
     std::setvbuf(current_file_, nullptr, _IONBF, 0);
 
     SPDLOG_INFO("WalWriter: opened WAL file '{}'", current_file_path_);
