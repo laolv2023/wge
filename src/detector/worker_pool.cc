@@ -285,7 +285,6 @@ void WgeWorkerPool::workerLoop(int worker_id) {
 
                 producer_.sendAlert(std::move(alert));
                 metrics_.incrementAlertsProduced();
-                metrics_.incrementRuleMatches();
                 metrics_.incrementEventsProcessed();
             } else {
                 metrics_.incrementEventsProcessed();
@@ -455,15 +454,14 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
 
     // 注: 以下代码为适配层，具体 API 可能不同
     // 实际部署时需根据 WGE SDK 版本调整
-#if 0
-    // 示例: 假设 Transaction 有此方法
+    // 提取 matched_variables: 通过 getCurrentMatchedVariables() 填充
+    // matched_var_name / matched_var_value / matched_var_original
     const auto& matched_vars = tx->getCurrentMatchedVariables();
     for (size_t i = 0; i < matched_vars.size() && i < result.matched_rules.size(); ++i) {
         result.matched_rules[i].matched_var_name = matched_vars[i].first;
         result.matched_rules[i].matched_var_value = matched_vars[i].second.first;
         result.matched_rules[i].matched_var_original = matched_vars[i].second.second;
     }
-#endif
 
     // 规则计数
     metrics_.addEventsProcessed(1);
