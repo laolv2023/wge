@@ -4,17 +4,32 @@
  * @file worker_pool.h
  * @brief WgeWorkerPool — WGE 检测线程池
  *
- * WgeWorkerPool 管理固定数量的 worker 线程，每个线程从有界队列中
+ * ## 模块职责
+ * WgeWorkerPool 管理固定数量的 worker 线程，每个线程从有界阻塞队列中
  * 消费 HttpAccessEvent，调用 WGE 引擎进行安全检测，并将结果通过
- * AlertProducer 发送。
+ * AlertProducer 发送到下游 Kafka topic。
  *
- * 特性:
- * - 固定线程池 (Thread-per-core 模型)
- * - 有界阻塞队列 (背压控制)
- * - Per-task 超时机制 (std::future + wait_for)
- * - 优雅停止 (排空队列、等待 in-flight 任务)
+ * ## 核心设计
+ * - **固定线程池 (Thread-per-core 模型)**: 启动时创建固定数量的 worker 线程，
+ *   线程数默认等于 CPU 核心数，避免过度订阅和上下文切换开销。
+ * - **有界阻塞队列 (背压控制)**: 使用 std::deque + 两个条件变量实现
+ *   BoundedBlockingQueue。队列满时 submitBatch 阻塞等待，防止内存无限增长。
+ * - **Per-task 超时机制 (cooperative)**: 在 detect() 流程的每个步骤间插入
+ *   超时检查点，超时后提前返回空结果，避免因 WGE 规则执行过慢导致 worker 阻塞。
+ * - **优雅停止**: 先设置停止标志唤醒所有线程，排空剩余队列任务并逐个处理，
+ *   最后等待所有 worker 线程退出。析构函数自动调用 stop()。
  *
- * 线程安全: 所有公有方法线程安全，使用 mutex + condition_variable 同步。
+ * ## 线程模型
+ * - 1 个生产者线程（通常是 Kafka consumer poll 线程）：调用 submitBatch()
+ * - N 个消费者线程（worker 线程）：运行 workerLoop()
+ * - 共享资源：task_queue_（有界阻塞队列）、stopped_/started_ 原子标志
+ *
+ * ## 线程安全
+ * - 所有公有方法线程安全
+ * - submitBatch() 使用 queue_mutex_ + not_full_（满等待）
+ * - workerLoop() 使用 queue_mutex_ + not_empty_（空等待）
+ * - started_/stopped_ 使用 std::atomic 保证可见性
+ * - 析构函数捕获所有异常，保证不抛出
  */
 
 #include <atomic>
@@ -65,16 +80,24 @@ namespace detector {
 // ============================================================================
 
 /**
- * @brief Worker 线程池配置
+ * @brief Worker 线程池配置结构体
+ *
+ * 集中管理检测线程池的所有可调参数。默认值适用于中等负载场景，
+ * 高吞吐场景建议根据 CPU 核心数和 WGE 规则复杂度调优。
  */
 struct WorkerConfig {
-    /// @brief Worker 线程数。0 表示自动检测 (hardware_concurrency)
+    /// @brief Worker 线程数。0 表示自动检测 (std::thread::hardware_concurrency())
+    /// @note 线程数 = 0 时，构造函数中自动设为核心数，若检测失败则回退为 4
     int worker_threads{8};
 
-    /// @brief 最大待处理任务数 (队列容量)
+    /// @brief 最大待处理任务数（有界队列容量），控制内存使用上限
+    /// @note 队列满时 submitBatch() 阻塞等待，形成背压，
+    ///       防止 Kafka consumer 拉取速度远超 worker 处理速度导致 OOM
     int max_pending_tasks{2000};
 
-    /// @brief 单任务超时时间 (ms)
+    /// @brief 单任务超时时间 (毫秒)
+    /// @note 超时后 detect() 在下一个检查点提前返回，
+    ///       已匹配的规则结果仍会保留并生成告警
     int task_timeout_ms{5000};
 };
 
@@ -88,17 +111,30 @@ struct WorkerConfig {
  * 管理 N 个 worker 线程，从有界阻塞队列中消费检测任务。
  * 每个任务调用 detect() 函数执行 WGE 规则匹配，结果通过 AlertProducer 发送。
  *
- * 使用示例:
+ * ## 生命周期
+ * 1. **构造**: 校验并补全 config，不启动线程
+ * 2. **start()**: 创建 N 个 worker 线程，开始消费队列
+ * 3. **运行**: 通过 submitBatch() 提交任务，worker 自动处理
+ * 4. **stop()**: 设置停止标志 → 唤醒线程 → 等待退出 → 排空剩余任务
+ * 5. **析构**: 若未 stop 则自动调用 stop()（异常安全）
+ *
+ * ## 使用示例:
  * @code
+ *   // 构造（不启动线程）
  *   WgeWorkerPool pool(engine, producer, metrics, config);
+ *   // 启动所有 worker 线程
  *   pool.start();
  *
- *   // 批量提交
+ *   // 批量提交检测任务（可能阻塞若队列满）
  *   int64_t submitted = pool.submitBatch(std::move(events));
  *
- *   // 优雅停止
+ *   // 优雅停止（阻塞直到所有 worker 退出，并排空队列）
  *   pool.stop();
+ *   // 或依赖析构函数自动停止
  * @endcode
+ *
+ * @note engine 和 producer 必须为引用，生命周期需长于 WgeWorkerPool
+ * @note 不可复制、不可移动（管理线程资源）
  */
 class WgeWorkerPool {
 public:
@@ -218,25 +254,26 @@ private:
     static void onRuleMatch(const wge::Rule& rule, void* user_data);
 
     // ---- 配置 ----
-    const wge::Engine& engine_;
-    AlertProducer& producer_;
-    metrics::Metrics& metrics_;
-    WorkerConfig config_;
+    const wge::Engine& engine_;          ///< WGE 检测引擎引用（非所有权，外部管理生命周期）
+    AlertProducer& producer_;            ///< 告警生产者引用，用于发送检测结果
+    metrics::Metrics& metrics_;          ///< Metrics 单例引用，用于指标上报
+    WorkerConfig config_;                ///< Worker 配置（构造时补全默认值）
 
     // ---- 线程池 ----
-    std::vector<std::thread> workers_;
-    std::atomic<bool> started_{false};
-    std::atomic<bool> stopped_{false};
-    std::atomic<size_t> active_workers_{0};
+    std::vector<std::thread> workers_;   ///< Worker 线程容器，start() 时创建
+    std::atomic<bool> started_{false};   ///< 是否已启动（CAS 防护重复 start）
+    std::atomic<bool> stopped_{false};   ///< 是否已请求停止（CAS 防护重复 stop）
+    std::atomic<size_t> active_workers_{0}; ///< 当前正在执行 detect() 的线程数
 
-    // ---- 任务队列 ----
-    mutable std::mutex queue_mutex_;
-    std::condition_variable not_empty_;
-    std::condition_variable not_full_;
-    std::deque<std::shared_ptr<HttpAccessEvent>> task_queue_;
+    // ---- 任务队列 (有界阻塞队列) ----
+    mutable std::mutex queue_mutex_;     ///< 保护 task_queue_ 的互斥锁
+    std::condition_variable not_empty_;  ///< worker 等待条件：队列非空
+    std::condition_variable not_full_;   ///< submitBatch 等待条件：队列未满
+    std::deque<std::shared_ptr<HttpAccessEvent>> task_queue_; ///< 任务队列（FIFO）
 
-    // ---- Per-task 超时 support ----
-    // (实际超时逻辑在 workerLoop 中使用 chrono 实现)
+    // ---- Per-task 超时支持 ----
+    // 超时检测通过 workerLoop 中的 chrono::steady_clock 实现，
+    // detect() 在各步骤间插入 timed_out() 检查点实现协作式超时
 };
 
 }  // namespace detector
