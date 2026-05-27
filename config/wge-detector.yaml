@@ -1,0 +1,78 @@
+# wge-detector.yaml — WGE-Kafka 检测器主配置
+
+# ===== Kafka 配置 =====
+kafka:
+  # Consumer 配置
+  consumer:
+    bootstrap_servers: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+    group_id: "wge-detector-group"
+    topic: "http-access"                    # [可配置] 输入 Topic
+    dlq_topic: "http-access-dlq"            # [可配置] 死信队列 Topic
+    partition_assignment_strategy: "cooperative-sticky"
+    auto_offset_reset: "latest"             # earliest | latest (生产默认 latest, 避免重启回放)
+    enable_auto_commit: false               # 手动提交，确保 exactly-once
+    session_timeout_ms: 30000
+    max_poll_records: 500                   # 单次 poll 最大记录数
+    max_poll_interval_ms: 300000
+    fetch_max_bytes: 1048576                # 1MB per fetch
+    security_protocol: "SASL_PLAINTEXT"     # SASL_SSL | SASL_PLAINTEXT | PLAINTEXT
+    sasl_mechanism: "SCRAM-SHA-512"
+    sasl_username: "${KAFKA_SASL_USERNAME}"
+    sasl_password: "${KAFKA_SASL_PASSWORD}"
+
+  # Producer 配置 (告警输出)
+  producer:
+    bootstrap_servers: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+    topic: "wge-alert"                      # [可配置] 告警 Topic
+    acks: "all"                             # 确保所有 ISR 确认
+    enable_idempotence: true                # 幂等 Producer
+    compression_type: "lz4"
+    batch_size: 65536
+    linger_ms: 20
+    retries: 3
+    max_in_flight_requests_per_connection: 5  # enable_idempotence 下可安全设 5
+    transactional_id: "wge-alert-txn-${INSTANCE_ID}"  # 事务性 Producer, 多实例时 ID 必须唯一
+    security_protocol: "SASL_PLAINTEXT"
+    sasl_mechanism: "SCRAM-SHA-512"
+    sasl_username: "${KAFKA_SASL_USERNAME}"
+    sasl_password: "${KAFKA_SASL_PASSWORD}"
+
+# ===== WGE 引擎配置 =====
+wge:
+  rule_files:
+    - "/etc/wge/rules/crs-setup.conf"
+    - "/etc/wge/rules/crs/rules/*.conf"
+  log_level: "warn"                         # trace|debug|info|warn|error|critical|off
+  log_file: "/var/log/wge/engine.log"
+  property_store_json: "/etc/wge/property_store.json"  # 可选
+
+# ===== 日志映射配置 =====
+mapping:
+  config_file: "/etc/wge/log_mapping.yaml"  # 映射规则配置文件
+
+# ===== 检测调度配置 =====
+detector:
+  poll_interval_ms: 100                     # [可配置] Kafka 消费轮询间隔 (ms)
+  worker_threads: 8                         # WGE 检测工作线程数
+  batch_size: 100                           # 单批次处理事件数上限
+  alert_batch_size: 50                      # 告警批量发送大小
+  alert_linger_ms: 50                       # 告警批量发送等待时间
+
+  # 背压与限流
+  max_pending_tasks: 2000                   # Worker 线程池最大待处理任务
+  task_timeout_ms: 5000                     # 单任务检测超时 (超时放弃进 DLQ)
+  slow_consumer_threshold_ms: 5000          # 处理延迟告警阈值
+
+  # 健康检查
+  health_check_port: 9100
+  readiness_threshold_lag: 10000            # Consumer lag > 此值则标记 not-ready
+
+# ===== 可观测性 =====
+observability:
+  prometheus:
+    enabled: true
+    port: 9101
+    path: "/metrics"
+  opentelemetry:
+    enabled: false
+    endpoint: "http://otel-collector:4317"
