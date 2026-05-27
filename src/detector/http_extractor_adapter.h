@@ -68,7 +68,7 @@ using HeaderTraversal = std::function<void(std::function<void(std::string_view, 
  * @code
  *   auto event = std::make_shared<HttpAccessEvent>();
  *   // ... 填充 event ...
- *   HttpExtractorAdapter adapter(event);
+ *   HttpExtractorAdapter adapter(*event);
  *
  *   // 在 WGE detect() 中使用:
  *   auto tx = engine.makeTransaction();
@@ -88,13 +88,12 @@ public:
      * 从 HttpAccessEvent 中提取所有 request_headers 和 response_headers，
      * 构建 unordered_map 索引。key 统一转为小写以实现大小写不敏感查找。
      *
-     * @param event 共享所有权的 HttpAccessEvent
-     * @throws std::runtime_error 若 event 为 nullptr
+     * @param event HttpAccessEvent 引用（调用方保证生命周期长于适配器）
      *
      * @note 索引在构造完成后只读，不存在 rehash 失效。
      * @note 采用 vector<string> 存储同一 key 的多个 value (Set-Cookie 等场景)。
      */
-    explicit HttpExtractorAdapter(std::shared_ptr<HttpAccessEvent> event);
+    explicit HttpExtractorAdapter(const HttpAccessEvent& event);
 
     /// @brief 默认析构
     ~HttpExtractorAdapter() = default;
@@ -179,10 +178,10 @@ public:
     /**
      * @brief 获取底层 HttpAccessEvent
      *
-     * @return const std::shared_ptr<HttpAccessEvent>&
+     * @return const HttpAccessEvent&
      */
-    [[nodiscard]] const std::shared_ptr<HttpAccessEvent>& event() const noexcept {
-        return event_;
+    [[nodiscard]] const HttpAccessEvent& event() const noexcept {
+        return *event_;
     }
 
 private:
@@ -199,8 +198,8 @@ private:
      */
     [[nodiscard]] static std::string toLower(std::string_view sv);
 
-    /// @brief 共享所有权的 HttpAccessEvent
-    std::shared_ptr<HttpAccessEvent> event_;
+    /// @brief HttpAccessEvent 引用（调用方保证生命周期）
+    const HttpAccessEvent* event_{nullptr};
 
     /// @brief Request header 索引: lowercased_key → values
     std::unordered_map<std::string, std::vector<std::string>> request_header_index_;
