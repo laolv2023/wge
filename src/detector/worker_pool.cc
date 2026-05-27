@@ -6,7 +6,6 @@
 #include "detector/worker_pool.h"
 
 #include <chrono>
-#include <future>
 #include <stdexcept>
 #include <string_view>
 
@@ -99,9 +98,6 @@ void WgeWorkerPool::stop() {
     SPDLOG_INFO("WgeWorkerPool::stop: signaling all workers to stop");
 
     // 唤醒所有等待的 worker 线程
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-    }
     not_empty_.notify_all();
     not_full_.notify_all();
 
@@ -113,37 +109,40 @@ void WgeWorkerPool::stop() {
     }
     workers_.clear();
 
-    SPDLOG_INFO("WgeWorkerPool::stop: all workers stopped, "
-                "remaining tasks in queue: {}",
-                task_queue_.size());
-
     // 排空并处理队列中剩余的任务
+    // 先将任务移出队列 (swap)，释放锁，再逐个处理，避免持锁调用 detect/sendAlert
+    std::deque<std::shared_ptr<HttpAccessEvent>> remaining;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        while (!task_queue_.empty()) {
-            auto event = std::move(task_queue_.front());
-            task_queue_.pop_front();
+        remaining.swap(task_queue_);
+        SPDLOG_INFO("WgeWorkerPool::stop: all workers stopped, "
+                    "remaining tasks in queue: {}",
+                    remaining.size());
+    }
 
-            // 在锁外处理 (但这里简单起见在锁内处理，因为已经停止不会阻塞)
-            try {
-                AlertResult result = detect(*event);
-                if (result.hasMatches()) {
-                    auto alert = AlertBuilder::build(
-                        result,
-                        event->event_id(),
-                        event->collector_id(),
-                        event->request_method(),
-                        event->request_uri(),
-                        event->downstream_ip(),
-                        event->upstream_ip());
-                    producer_.sendAlert(std::move(alert));
-                    metrics_.incrementAlertsProduced();
-                }
-                metrics_.incrementEventsProcessed();
-            } catch (const std::exception& e) {
-                SPDLOG_ERROR("WgeWorkerPool::stop: drain task failed: {}", e.what());
-                metrics_.incrementEventsDropped();
+    // drain 超时: task_timeout_ms * 2, 防止挂起的 detect() 永久阻塞 shutdown
+    auto drain_deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(config_.task_timeout_ms * 2);
+
+    for (auto& event : remaining) {
+        try {
+            AlertResult result = detect(*event, drain_deadline);
+            if (result.hasMatches()) {
+                auto alert = AlertBuilder::build(
+                    result,
+                    event->event_id(),
+                    event->collector_id(),
+                    event->request_method(),
+                    event->request_uri(),
+                    event->downstream_ip(),
+                    event->upstream_ip());
+                producer_.sendAlert(std::move(alert));
+                metrics_.incrementAlertsProduced();
             }
+            metrics_.incrementEventsProcessed();
+        } catch (const std::exception& e) {
+            SPDLOG_ERROR("WgeWorkerPool::stop: drain task failed: {}", e.what());
+            metrics_.incrementEventsDropped();
         }
     }
 
@@ -254,51 +253,42 @@ void WgeWorkerPool::workerLoop(int worker_id) {
             continue;
         }
 
-        // ---- Per-task 超时检测 ----
+        // ---- Per-task 超时检测 (cooperative) ----
         active_workers_.fetch_add(1, std::memory_order_relaxed);
         metrics_.worker_pool_active.store(
             static_cast<int64_t>(active_workers_.load(std::memory_order_relaxed)),
             std::memory_order_relaxed);
 
         auto timeout = std::chrono::milliseconds(config_.task_timeout_ms);
+        auto deadline = std::chrono::steady_clock::now() + timeout;
 
         try {
-            // 使用 std::async + future 实现超时
-            auto future = std::async(std::launch::async, [this, &event]() {
-                return detect(*event);
-            });
+            AlertResult result = detect(*event, deadline);
 
-            if (future.wait_for(timeout) == std::future_status::ready) {
-                AlertResult result = future.get();
-
-                // 记录检测耗时到 metrics
-                // (简化实现; 实际应在 detect 内部记录)
-
-                if (result.hasMatches()) {
-                    // 构建告警并发送
-                    auto alert = AlertBuilder::build(
-                        result,
-                        event->event_id(),
-                        event->collector_id(),
-                        event->request_method(),
-                        event->request_uri(),
-                        event->downstream_ip(),
-                        event->upstream_ip());
-
-                    producer_.sendAlert(std::move(alert));
-                    metrics_.incrementAlertsProduced();
-                    metrics_.incrementRuleMatches();
-                }
-
-                metrics_.incrementEventsProcessed();
-
-            } else {
-                // 超时 — 任务仍在后台运行，但我们放弃等待
+            // 检测是否因超时而提前返回（结果为空且无匹配）
+            if (std::chrono::steady_clock::now() > deadline) {
                 SPDLOG_WARN("WgeWorkerPool: worker {} task timed out after {}ms "
                             "for event_id={}",
                             worker_id, config_.task_timeout_ms,
                             event->event_id());
                 metrics_.incrementEventsDropped();
+            } else if (result.hasMatches()) {
+                // 构建告警并发送
+                auto alert = AlertBuilder::build(
+                    result,
+                    event->event_id(),
+                    event->collector_id(),
+                    event->request_method(),
+                    event->request_uri(),
+                    event->downstream_ip(),
+                    event->upstream_ip());
+
+                producer_.sendAlert(std::move(alert));
+                metrics_.incrementAlertsProduced();
+                metrics_.incrementRuleMatches();
+                metrics_.incrementEventsProcessed();
+            } else {
+                metrics_.incrementEventsProcessed();
             }
 
         } catch (const std::exception& e) {
@@ -322,10 +312,17 @@ void WgeWorkerPool::workerLoop(int worker_id) {
 // detect — 核心 WGE 检测流程
 // ============================================================================
 
-AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event) {
+AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
+                                   std::chrono::steady_clock::time_point deadline) {
     AlertResult result;
     result.event_id = event.event_id();
     result.timestamp_ms = event.timestamp_ms();
+
+    // 辅助宏：检查是否超时
+    auto timed_out = [&deadline]() -> bool {
+        return deadline != std::chrono::steady_clock::time_point::max() &&
+               std::chrono::steady_clock::now() > deadline;
+    };
 
     // 1. 创建 Transaction
     auto tx = engine_.makeTransaction();
@@ -334,57 +331,90 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event) {
     }
 
     // 2. processConnection — 连接信息
-    tx->processConnection(
-        event.downstream_ip(),
-        static_cast<short>(event.downstream_port()),
-        event.upstream_ip(),
-        static_cast<short>(event.upstream_port()));
+    if (!tx->processConnection(
+            event.downstream_ip(),
+            static_cast<short>(event.downstream_port()),
+            event.upstream_ip(),
+            static_cast<short>(event.upstream_port()))) {
+        SPDLOG_WARN("WgeWorkerPool::detect: processConnection failed for event_id={}",
+                     event.event_id());
+        metrics_.incrementEventsDropped();
+        return result;
+    }
+    if (timed_out()) return result;
 
     // 3. processUri — URI + Method + HTTP 版本
-    tx->processUri(
-        event.request_uri(),
-        event.request_method(),
-        event.request_version());
+    if (!tx->processUri(
+            event.request_uri(),
+            event.request_method(),
+            event.request_version())) {
+        SPDLOG_WARN("WgeWorkerPool::detect: processUri failed for event_id={}",
+                     event.event_id());
+        metrics_.incrementEventsDropped();
+        return result;
+    }
+    if (timed_out()) return result;
 
-    // 4. 构建 HttpExtractorAdapter (头信息适配器)
-    //    使用 shared_ptr 包装 event (copy shared ownership is fine)
-    auto event_ptr = std::make_shared<HttpAccessEvent>(event);
-    HttpExtractorAdapter adapter(event_ptr);
+    // 4. 构建 HttpExtractorAdapter (使用引用，避免 protobuf 深拷贝)
+    HttpExtractorAdapter adapter(event);
 
     // 5. processRequestHeaders
     auto req_header_find = adapter.requestHeaderFind();
     auto req_header_traversal = adapter.requestHeaderTraversal();
 
-    tx->processRequestHeaders(
-        req_header_find,
-        req_header_traversal,
-        adapter.requestHeaderCount(),
-        &WgeWorkerPool::onRuleMatch,
-        &result,
-        nullptr,   // AdditionalCondCallback
-        nullptr);  // Additional cond user_data
+    if (!tx->processRequestHeaders(
+            req_header_find,
+            req_header_traversal,
+            adapter.requestHeaderCount(),
+            &WgeWorkerPool::onRuleMatch,
+            &result,
+            nullptr,   // AdditionalCondCallback
+            nullptr)) {  // Additional cond user_data
+        SPDLOG_WARN("WgeWorkerPool::detect: processRequestHeaders failed for event_id={}",
+                     event.event_id());
+        metrics_.incrementEventsDropped();
+        return result;
+    }
+    if (timed_out()) return result;
 
     // 6. processRequestBody
     if (!event.request_body().empty()) {
-        tx->processRequestBody(event.request_body());
+        if (!tx->processRequestBody(event.request_body())) {
+            SPDLOG_WARN("WgeWorkerPool::detect: processRequestBody failed for event_id={}",
+                         event.event_id());
+            metrics_.incrementEventsDropped();
+            return result;
+        }
     }
+    if (timed_out()) return result;
 
     // 7. processResponseHeaders
     auto resp_header_find = adapter.responseHeaderFind();
     auto resp_header_traversal = adapter.responseHeaderTraversal();
 
-    tx->processResponseHeaders(
-        adapter.responseStatusCode(),
-        adapter.responseProtocol(),
-        resp_header_find,
-        resp_header_traversal,
-        adapter.responseHeaderCount(),
-        &WgeWorkerPool::onRuleMatch,
-        &result);
+    if (!tx->processResponseHeaders(
+            adapter.responseStatusCode(),
+            adapter.responseProtocol(),
+            resp_header_find,
+            resp_header_traversal,
+            adapter.responseHeaderCount(),
+            &WgeWorkerPool::onRuleMatch,
+            &result)) {
+        SPDLOG_WARN("WgeWorkerPool::detect: processResponseHeaders failed for event_id={}",
+                     event.event_id());
+        metrics_.incrementEventsDropped();
+        return result;
+    }
+    if (timed_out()) return result;
 
     // 8. processResponseBody
     if (!event.response_body().empty()) {
-        tx->processResponseBody(event.response_body());
+        if (!tx->processResponseBody(event.response_body())) {
+            SPDLOG_WARN("WgeWorkerPool::detect: processResponseBody failed for event_id={}",
+                         event.event_id());
+            metrics_.incrementEventsDropped();
+            return result;
+        }
     }
 
     // 9. 提取 matched_variables — 通过 Transaction 的 friend 访问或 public getter
