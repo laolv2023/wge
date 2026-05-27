@@ -203,7 +203,9 @@ private:
      * @param event 待检测的 HTTP 访问事件
      * @return AlertResult 检测结果
      */
-    AlertResult detect(const HttpAccessEvent& event);
+    AlertResult detect(const HttpAccessEvent& event,
+                       std::chrono::steady_clock::time_point deadline
+                           = std::chrono::steady_clock::time_point::max());
 
     /**
      * @brief LogCallback — WGE 规则匹配回调
