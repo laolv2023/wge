@@ -5,6 +5,9 @@
 
 #include "mapper/mapper.h"
 
+#include <climits>
+#include <stdexcept>
+
 #include "http_access.pb.h"
 #include "mapper/field_applier.h"
 #include "mapper/json_mapper.h"
@@ -51,9 +54,10 @@ LogMapper::LogMapper(const MapperConfig& config)
                 auto compile_result =
                     impl_->regex_mapper->compile(config_.regex_pattern);
                 if (!compile_result) {
-                    spdlog::error("LogMapper: failed to compile regex '{}': {}",
-                                  config_.regex_pattern,
-                                  compile_result.error());
+                    throw std::runtime_error(
+                        std::string("LogMapper: failed to compile regex '") +
+                        config_.regex_pattern +
+                        "': " + compile_result.error());
                 } else {
                     spdlog::debug("LogMapper: compiled regex '{}'",
                                   config_.regex_pattern);
@@ -148,13 +152,21 @@ std::expected<std::shared_ptr<HttpAccessEvent>, std::string> LogMapper::map(
 
         case Format::Protobuf: {
             // 直接反序列化 Protobuf
+            if (raw_payload.size() > static_cast<size_t>(INT_MAX)) {
+                return std::unexpected(
+                    std::string("Protobuf payload too large: ") +
+                    std::to_string(raw_payload.size()) + " bytes");
+            }
             if (!event->ParseFromArray(raw_payload.data(),
                                        static_cast<int>(raw_payload.size()))) {
                 return std::unexpected(
                     std::string("Failed to parse Protobuf payload (") +
                     std::to_string(raw_payload.size()) + " bytes)");
             }
-            // Protobuf 已直接解析完成，无需进一步字段映射
+            // 应用常量字段
+            for (const auto& cf : config_.constant_fields) {
+                impl_->field_applier->applyConstant(*event, cf.target, cf.value);
+            }
             return event;
         }
     }
@@ -169,7 +181,7 @@ std::expected<std::shared_ptr<HttpAccessEvent>, std::string> LogMapper::map(
         if (it != extracted_fields.end()) {
             int64_t ts_ms = impl_->field_applier->parseTimestamp(
                 it->second, ts_cfg.formats);
-            if (ts_ms > 0) {
+            if (ts_ms >= 0) {
                 event->set_timestamp_ms(ts_ms);
             } else {
                 spdlog::warn("Failed to parse timestamp from field '{}'='{}'",
