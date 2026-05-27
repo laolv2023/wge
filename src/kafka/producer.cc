@@ -298,7 +298,7 @@ void AlertProducer::flushLoopImpl(
                     SPDLOG_ERROR("begin_transaction failed: {}",
                                  RdKafka::err2str(begin_err));
                     // 重启事务或跳过此批次
-                    producer_->abort_transaction(5000);
+                    producer_->abort_transaction(30'000);
                     continue;
                 }
             }
@@ -372,7 +372,7 @@ void AlertProducer::flushLoopImpl(
                 if (commit_err != RdKafka::ERR_NO_ERROR) {
                     SPDLOG_ERROR("commit_transaction failed: {}",
                                  RdKafka::err2str(commit_err));
-                    producer_->abort_transaction(5'000);
+                    producer_->abort_transaction(30'000);
                     continue;
                 }
             }
@@ -383,7 +383,7 @@ void AlertProducer::flushLoopImpl(
         } catch (const std::exception& e) {
             SPDLOG_ERROR("AlertProducer flush loop exception: {}", e.what());
             if (has_transaction) {
-                producer_->abort_transaction(5'000);
+                producer_->abort_transaction(30'000);
             }
         }
     }
@@ -475,14 +475,14 @@ void AlertProducer::flushLoopImpl(
                             "AlertProducer shutdown drain: "
                             "commit_transaction failed: {}",
                             RdKafka::err2str(commit_err));
-                        producer_->abort_transaction(5'000);
+                        producer_->abort_transaction(30'000);
                     }
                 }
             }
         } catch (const std::exception& e) {
             SPDLOG_ERROR("AlertProducer shutdown drain error: {}", e.what());
             if (has_transaction) {
-                producer_->abort_transaction(5'000);
+                producer_->abort_transaction(30'000);
             }
         }
     }
