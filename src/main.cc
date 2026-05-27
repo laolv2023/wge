@@ -84,19 +84,14 @@ void signalHandler(int signum) {
     switch (signum) {
         case SIGTERM:
         case SIGINT:
-            SPDLOG_INFO("Received signal {} (SIGTERM/SIGINT), "
-                        "initiating graceful shutdown",
-                        signum);
             g_shutdown_requested.store(true, std::memory_order_release);
             break;
 
         case SIGHUP:
-            SPDLOG_INFO("Received SIGHUP, requesting configuration reload");
             g_reload_requested.store(true, std::memory_order_release);
             break;
 
         default:
-            SPDLOG_WARN("Received unhandled signal: {}", signum);
             break;
     }
 }
@@ -325,9 +320,9 @@ int main(int argc, char* argv[]) {
     try {
         for (const auto& rule_file : config.wge.rule_files) {
             SPDLOG_INFO("Loading WGE rules from: {}", rule_file);
-            // engine.loadRules(rule_file);
+            engine.loadRules(rule_file);
         }
-        // engine.init(config.wge.engine_config_path);
+        engine.init(config.wge.engine_config_path);
     } catch (const std::exception& e) {
         SPDLOG_ERROR("Failed to initialize WGE Engine: {}", e.what());
         if (config.wge.strict_mode) {
@@ -347,7 +342,14 @@ int main(int argc, char* argv[]) {
                      mapper_cfg_result.error());
         return 1;
     }
-    LogMapper mapper(*mapper_cfg_result);
+    std::unique_ptr<LogMapper> mapper_up;
+    try {
+        mapper_up = std::make_unique<LogMapper>(*mapper_cfg_result);
+    } catch (const std::exception& e) {
+        SPDLOG_ERROR("Failed to initialize LogMapper: {}", e.what());
+        return 1;
+    }
+    LogMapper& mapper = *mapper_up;
     SPDLOG_INFO("LogMapper initialized: format={}",
                 formatToString(mapper.config().format));
 
@@ -419,7 +421,7 @@ int main(int argc, char* argv[]) {
     while (!g_shutdown_requested.load(std::memory_order_acquire)) {
         // 检查配置重载请求
         if (g_reload_requested.exchange(false, std::memory_order_acq_rel)) {
-            SPDLOG_INFO("Processing configuration reload from: {}",
+            SPDLOG_INFO("Received SIGHUP, processing configuration reload from: {}",
                         config_path);
             auto reload_result = ConfigLoader::reload(config, config_path);
             if (reload_result) {
@@ -455,7 +457,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- 14. 优雅停止 ----
-    SPDLOG_INFO("Initiating graceful shutdown...");
+    SPDLOG_INFO("Received shutdown signal, initiating graceful shutdown...");
 
     auto shutdown_start = std::chrono::steady_clock::now();
 
