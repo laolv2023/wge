@@ -1,0 +1,36 @@
+syntax = "proto3";
+package wge.kafka;
+
+// Kafka input topic: http-access
+message HttpAccessEvent {
+  // ---- 元信息 ----
+  string  event_id       = 1;   // UUID v7, 全局唯一
+  int64   timestamp_ms   = 2;   // 事件采集时间 (epoch ms)
+  string  collector_id   = 3;   // 采集源标识 (主机名/实例名)
+
+  // ---- 连接信息 ----
+  string  downstream_ip   = 10;
+  int32   downstream_port = 11;
+  string  upstream_ip     = 12;
+  int32   upstream_port   = 13;
+
+  // ---- 请求 ----
+  string  request_method  = 20;
+  string  request_uri     = 21;   // 完整 URI (含 query string)
+  string  request_version = 22;   // "1.1"
+  repeated Header request_headers = 23;
+  bytes   request_body    = 24;   // 原始 body bytes
+  int64   request_body_length = 25;
+
+  // ---- 响应 ----
+  int32   response_status  = 30;
+  string  response_version = 31;
+  repeated Header response_headers = 32;
+  bytes   response_body    = 33;
+  int64   response_body_length = 34;
+}
+
+message Header {
+  string key   = 1;
+  string value = 2;
+}
