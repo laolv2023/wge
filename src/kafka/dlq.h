@@ -11,6 +11,7 @@
  */
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 // 前向声明
@@ -147,6 +148,9 @@ private:
 
     /// @brief 关闭标志，保证幂等
     bool closed_{false};
+
+    /// @brief 保护 send/sendRaw/close 的互斥锁，防止 data race → UAF
+    mutable std::mutex send_mutex_;
 };
 
 }  // namespace wge::kafka
