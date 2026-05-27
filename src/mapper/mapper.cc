@@ -172,7 +172,7 @@ std::expected<std::shared_ptr<HttpAccessEvent>, std::string> LogMapper::map(
     }
 
     // 2. 将提取的字段应用到 event
-    impl_->field_applier->applyFields(extracted_fields, *event);
+    impl_->field_applier->applyFields(extracted_fields, *event, config_.field_mappings);
 
     // 3. 处理时间戳（Regex/Grok 格式需要额外解析）
     if (config_.format == Format::Regex || config_.format == Format::Grok) {
