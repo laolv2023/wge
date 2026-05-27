@@ -160,7 +160,8 @@ void AlertProducer::sendAlert(std::shared_ptr<WgeAlertEvent> alert) {
     queue_cv_.notify_one();
 }
 
-void AlertProducer::flushLoop(RdKafka::ConsumerGroupMetadata* group_metadata) {
+void AlertProducer::flushLoop(
+    std::function<RdKafka::ConsumerGroupMetadata*()> group_metadata_provider) {
     if (running_.exchange(true, std::memory_order_acq_rel)) {
         throw std::runtime_error(
             "AlertProducer::flushLoop: flush thread already running");
@@ -168,7 +169,7 @@ void AlertProducer::flushLoop(RdKafka::ConsumerGroupMetadata* group_metadata) {
 
     stopped_.store(false, std::memory_order_release);
     flush_thread_ = std::thread(
-        &AlertProducer::flushLoopImpl, this, group_metadata);
+        &AlertProducer::flushLoopImpl, this, std::move(group_metadata_provider));
 
     SPDLOG_INFO("AlertProducer flush loop started: batch_size={}, linger_ms={}",
                 config_.batch_size, config_.linger_ms);
@@ -194,7 +195,11 @@ void AlertProducer::close() {
 
     if (producer_) {
         // 最后一次 flush，等待所有消息发送完毕
-        producer_->flush(30'000);  // 30s
+        RdKafka::ErrorCode flush_err = producer_->flush(30'000);  // 30s
+        if (flush_err != RdKafka::ERR_NO_ERROR) {
+            SPDLOG_ERROR("AlertProducer::close: final flush failed: {}",
+                         RdKafka::err2str(flush_err));
+        }
         delete producer_;
         producer_ = nullptr;
         SPDLOG_INFO("AlertProducer::close: producer closed");
@@ -238,7 +243,7 @@ std::string AlertProducer::serializeAlert(const WgeAlertEvent& alert) const {
 }
 
 void AlertProducer::flushLoopImpl(
-    RdKafka::ConsumerGroupMetadata* group_metadata) {
+    std::function<RdKafka::ConsumerGroupMetadata*()> group_metadata_provider) {
 
     SPDLOG_INFO("AlertProducer flush loop started");
 
@@ -337,6 +342,17 @@ void AlertProducer::flushLoopImpl(
 
             // 提交事务 (含 offset)
             if (has_transaction) {
+                // 先检查 produce 是否有错误，有则 abort
+                if (produce_errors > 0) {
+                    SPDLOG_ERROR("AlertProducer: {} produce errors, aborting transaction",
+                                 produce_errors);
+                    producer_->abort_transaction(30'000);
+                    continue;
+                }
+
+                // 每次事务前从 consumer 重新获取 group_metadata（rebalance 后不失效）
+                RdKafka::ConsumerGroupMetadata* group_metadata =
+                    group_metadata_provider ? group_metadata_provider() : nullptr;
                 if (group_metadata) {
                     // CTP: 将 consumer offset 也纳入事务
                     RdKafka::ErrorCode offset_err =
@@ -373,54 +389,101 @@ void AlertProducer::flushLoopImpl(
     }
 
     // ---- 处理停止信号到达后剩余的队列消息 ----
+    // 先 swap 到局部变量，释放锁后再逐条 produce，避免持锁调用阻塞操作
+    std::deque<std::shared_ptr<WgeAlertEvent>> remaining;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         if (!alert_queue_.empty()) {
             SPDLOG_INFO("AlertProducer: draining {} remaining alerts on shutdown",
                         alert_queue_.size());
+            remaining.swap(alert_queue_);
+        }
+    }
 
-            bool has_transaction =
-                !config_.transactional_id.empty() && producer_;
+    if (!remaining.empty()) {
+        bool has_transaction =
+            !config_.transactional_id.empty() && producer_;
 
-            try {
-                if (has_transaction) {
+        try {
+            if (has_transaction) {
+                RdKafka::ErrorCode begin_err =
                     producer_->begin_transaction();
-                }
-
-                for (auto& alert : alert_queue_) {
-                    if (!alert) continue;
-                    std::string payload;
-                    try {
-                        payload = serializeAlert(*alert);
-                    } catch (...) {
-                        continue;
-                    }
-                    producer_->produce(
-                        config_.topic,
-                        RdKafka::Topic::PARTITION_UA,
-                        RdKafka::Producer::RK_MSG_COPY,
-                        const_cast<char*>(payload.data()),
-                        payload.size(),
-                        alert->alert_id().data(),
-                        alert->alert_id().size(),
-                        0, nullptr);
-                }
-
-                if (has_transaction) {
-                    if (group_metadata) {
-                        producer_->send_offsets_to_transaction(
-                            group_metadata, 30'000);
-                    }
-                    producer_->commit_transaction(30'000);
-                }
-            } catch (const std::exception& e) {
-                SPDLOG_ERROR("AlertProducer shutdown drain error: {}", e.what());
-                if (has_transaction) {
-                    producer_->abort_transaction(5'000);
+                if (begin_err != RdKafka::ERR_NO_ERROR) {
+                    SPDLOG_ERROR(
+                        "AlertProducer shutdown drain: begin_transaction failed: {}",
+                        RdKafka::err2str(begin_err));
+                    // 无法开始事务，跳过 drain
+                    return;
                 }
             }
 
-            alert_queue_.clear();
+            int32_t drain_errors = 0;
+            for (auto& alert : remaining) {
+                if (!alert) continue;
+                std::string payload;
+                try {
+                    payload = serializeAlert(*alert);
+                } catch (...) {
+                    drain_errors++;
+                    continue;
+                }
+                RdKafka::ErrorCode produce_err = producer_->produce(
+                    config_.topic,
+                    RdKafka::Topic::PARTITION_UA,
+                    RdKafka::Producer::RK_MSG_COPY,
+                    const_cast<char*>(payload.data()),
+                    payload.size(),
+                    alert->alert_id().data(),
+                    alert->alert_id().size(),
+                    0, nullptr);
+                if (produce_err != RdKafka::ERR_NO_ERROR) {
+                    SPDLOG_ERROR(
+                        "AlertProducer shutdown drain: produce failed for {}: {}",
+                        alert->alert_id(), RdKafka::err2str(produce_err));
+                    drain_errors++;
+                }
+            }
+
+            if (has_transaction) {
+                if (drain_errors > 0) {
+                    SPDLOG_ERROR(
+                        "AlertProducer shutdown drain: {} produce errors, aborting",
+                        drain_errors);
+                    producer_->abort_transaction(30'000);
+                } else {
+                    // 每次事务前从 consumer 重新获取 group_metadata
+                    RdKafka::ConsumerGroupMetadata* group_metadata =
+                        group_metadata_provider ? group_metadata_provider() : nullptr;
+                    if (group_metadata) {
+                        RdKafka::ErrorCode offset_err =
+                            producer_->send_offsets_to_transaction(
+                                group_metadata, 30'000);
+                        if (offset_err != RdKafka::ERR_NO_ERROR) {
+                            SPDLOG_ERROR(
+                                "AlertProducer shutdown drain: "
+                                "send_offsets_to_transaction failed: {}",
+                                RdKafka::err2str(offset_err));
+                            producer_->abort_transaction(30'000);
+                            return;
+                        }
+                    }
+
+                    RdKafka::ErrorCode commit_err =
+                        producer_->commit_transaction(30'000);
+                    if (commit_err != RdKafka::ERR_NO_ERROR) {
+                        SPDLOG_ERROR(
+                            "AlertProducer shutdown drain: "
+                            "commit_transaction failed: {}",
+                            RdKafka::err2str(commit_err));
+                        producer_->abort_transaction(5'000);
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            SPDLOG_ERROR("AlertProducer shutdown drain error: {}", e.what());
+            if (has_transaction) {
+                producer_->abort_transaction(5'000);
+            }
         }
     }
 
