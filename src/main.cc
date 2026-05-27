@@ -79,15 +79,22 @@ std::atomic<bool> g_reload_requested{false};
 
 /**
  * @brief 统一信号处理器
+ *
+ * 使用 sigaction 注册，SA_RESTART 标志确保被信号中断的系统调用自动重启。
+ * 原子变量保证 signal-unsafe 上下文中的安全写入。
+ *
+ * @param signum 信号编号 (SIGTERM/SIGINT/SIGHUP)
  */
 void signalHandler(int signum) {
     switch (signum) {
         case SIGTERM:
         case SIGINT:
+            // 优雅停止：设置原子标志，主循环检测到后执行 shutdown 流程
             g_shutdown_requested.store(true, std::memory_order_release);
             break;
 
         case SIGHUP:
+            // 热重载：设置重载标志，主循环检测到后重新加载配置
             g_reload_requested.store(true, std::memory_order_release);
             break;
 
@@ -98,13 +105,19 @@ void signalHandler(int signum) {
 
 /**
  * @brief 注册信号处理器
+ *
+ * 注册 SIGTERM/SIGINT（优雅停止）、SIGHUP（配置重载），
+ * 并显式忽略 SIGPIPE（防止写已关闭的 socket 导致进程退出）。
+ *
+ * @return true 所有关键信号处理器注册成功
+ * @return false SIGTERM 或 SIGINT 处理器注册失败
  */
 bool installSignalHandlers() {
     struct sigaction sa;
     std::memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signalHandler;
-    sa.sa_flags = SA_RESTART;
-    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;  // 被信号中断的系统调用自动重启
+    sigemptyset(&sa.sa_mask);  // 处理信号期间不阻塞其他信号
 
     if (sigaction(SIGTERM, &sa, nullptr) != 0) {
         std::cerr << "Failed to install SIGTERM handler: "
@@ -118,6 +131,7 @@ bool installSignalHandlers() {
         return false;
     }
 
+    // SIGHUP 注册失败仅警告，不影响程序启动
     struct sigaction sa_hup;
     std::memset(&sa_hup, 0, sizeof(sa_hup));
     sa_hup.sa_handler = signalHandler;
@@ -130,6 +144,7 @@ bool installSignalHandlers() {
                     std::strerror(errno));
     }
 
+    // 显式忽略 SIGPIPE：防止写已关闭的 socket/fifo 时进程被 kill
     struct sigaction sa_pipe;
     std::memset(&sa_pipe, 0, sizeof(sa_pipe));
     sa_pipe.sa_handler = SIG_IGN;
@@ -241,6 +256,13 @@ std::expected<std::string, int> parseArguments(int argc, char* argv[]) {
 
 /**
  * @brief 将 config::ConsumerConfig 桥接到 kafka::ConsumerConfig
+ *
+ * 两个命名空间各自定义了 ConsumerConfig 结构体（config:: 是 YAML 解析层，
+ * kafka:: 是 Kafka 客户端层），此函数进行字段映射和默认值补全。
+ *
+ * @param cfg YAML 解析得到的配置
+ * @param poll_interval_ms 从 detector config 传入的 poll 间隔
+ * @return kafka::ConsumerConfig 桥接后的 Kafka 客户端配置
  */
 wge::kafka::ConsumerConfig bridgeConsumerConfig(
     const wge::kafka::config::ConsumerConfig& cfg,
@@ -250,7 +272,7 @@ wge::kafka::ConsumerConfig bridgeConsumerConfig(
     out.group_id = cfg.group_id;
     out.topic = cfg.topic;
     out.max_poll_records = cfg.max_poll_records;
-    out.poll_interval_ms = poll_interval_ms;
+    out.poll_interval_ms = poll_interval_ms;  // 从 detector 配置传入，而非 YAML
     out.session_timeout_ms = cfg.session_timeout_ms;
     out.enable_auto_commit = cfg.enable_auto_commit;
     return out;
@@ -258,6 +280,10 @@ wge::kafka::ConsumerConfig bridgeConsumerConfig(
 
 /**
  * @brief 将 config::ProducerConfig 桥接到 kafka::ProducerConfig
+ *
+ * @param cfg YAML 解析得到的配置
+ * @param batch_size_override 从 detector config 传入的批次大小（覆盖 YAML 设置）
+ * @return kafka::ProducerConfig 桥接后的 Kafka 客户端配置
  */
 wge::kafka::ProducerConfig bridgeProducerConfig(
     const wge::kafka::config::ProducerConfig& cfg,
@@ -266,10 +292,10 @@ wge::kafka::ProducerConfig bridgeProducerConfig(
     out.bootstrap_servers = cfg.bootstrap_servers;
     out.topic = cfg.topic;
     out.compression_type = cfg.compression_type;
-    out.batch_size = batch_size_override;
-    out.linger_ms = static_cast<int32_t>(cfg.linger_ms);
+    out.batch_size = batch_size_override;  // 从 detector 配置覆盖
+    out.linger_ms = static_cast<int32_t>(cfg.linger_ms);  // double → int32
     out.retries = cfg.retries;
-    out.enable_idempotence = true;
+    out.enable_idempotence = true;  // 默认启用幂等性
     return out;
 }
 
@@ -314,17 +340,22 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- 5. 初始化 WGE Engine ----
+    // WGE 引擎是核心安全检测组件，需要加载规则文件和引擎配置
     SPDLOG_INFO("Initializing WGE Engine...");
 
     wge::Engine engine;
     try {
+        // 加载所有 WGE 规则文件
         for (const auto& rule_file : config.wge.rule_files) {
             SPDLOG_INFO("Loading WGE rules from: {}", rule_file);
             engine.loadRules(rule_file);
         }
+        // 初始化引擎（加载引擎配置，如变量定义、变换规则等）
         engine.init(config.wge.engine_config_path);
     } catch (const std::exception& e) {
         SPDLOG_ERROR("Failed to initialize WGE Engine: {}", e.what());
+        // strict_mode: 严格模式下引擎初始化失败则退出
+        // 非严格模式下继续运行（告警可能不准确）
         if (config.wge.strict_mode) {
             return 1;
         }
@@ -418,16 +449,20 @@ int main(int argc, char* argv[]) {
     SPDLOG_INFO("============================================");
 
     // ---- 13. 主事件循环 (等待信号) ----
+    // 主线程在此循环中：1) 检查关闭/重载信号 2) 更新 metrics
     while (!g_shutdown_requested.load(std::memory_order_acquire)) {
-        // 检查配置重载请求
+        // ---- 检查配置重载请求 ----
+        // exchange 原子地读取并清除标志，防止重复重载
         if (g_reload_requested.exchange(false, std::memory_order_acq_rel)) {
             SPDLOG_INFO("Received SIGHUP, processing configuration reload from: {}",
                         config_path);
+            // reload: 从 base config 开始合并新文件
             auto reload_result = ConfigLoader::reload(config, config_path);
             if (reload_result) {
                 config = std::move(*reload_result);
                 SPDLOG_INFO("Configuration reloaded successfully");
 
+                // 更新日志级别（配置重载后生效）
                 auto level =
                     spdlog::level::from_str(config.observability.log_level);
                 spdlog::set_level(level);
@@ -441,7 +476,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // 更新 consumer lag metrics
+        // ---- 更新 consumer lag metrics ----
+        // 供 Prometheus / 监控系统使用
         try {
             int64_t lag = consumer.consumerLag();
             if (lag >= 0) {
@@ -449,10 +485,10 @@ int main(int argc, char* argv[]) {
                     lag, std::memory_order_relaxed);
             }
         } catch (...) {
-            // 静默处理
+            // 静默处理 lag 查询失败（非关键路径）
         }
 
-        // 短暂休眠，避免 busy-wait
+        // 短暂休眠避免 busy-wait，同时确保对信号的响应延迟 ≤ 500ms
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
@@ -461,6 +497,8 @@ int main(int argc, char* argv[]) {
 
     auto shutdown_start = std::chrono::steady_clock::now();
 
+    // detector_service.stop() 触发级联停止：
+    //   consumer.stop() → producer.close() → pool.stop() → wal 清理
     detector_service.stop();
 
     auto shutdown_elapsed =
@@ -468,6 +506,7 @@ int main(int argc, char* argv[]) {
             std::chrono::steady_clock::now() - shutdown_start)
             .count();
 
+    // 输出最终统计
     SPDLOG_INFO("============================================");
     SPDLOG_INFO("  WGE-Kafka Detector SHUTDOWN COMPLETE");
     SPDLOG_INFO("  Duration: {}ms", shutdown_elapsed);
