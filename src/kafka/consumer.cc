@@ -117,6 +117,7 @@ KafkaConsumer::KafkaConsumer(const ConsumerConfig& config)
     if (err != RdKafka::ERR_NO_ERROR) {
         std::string msg = "Failed to subscribe to topic '" +
                           config_.topic + "': " + errorString(err);
+        consumer_->close();
         delete consumer_;
         consumer_ = nullptr;
         throw std::runtime_error(msg);
@@ -170,25 +171,22 @@ void KafkaConsumer::stop() {
 
     SPDLOG_INFO("KafkaConsumer::stop: signaling poll thread to stop");
 
-    // 唤醒可能在 poll 中阻塞的线程
-    {
-        std::lock_guard<std::mutex> lock(stop_mutex_);
+    // 立即关闭 consumer 以中断 poll 线程中阻塞的 consume() 调用
+    if (consumer_) {
+        consumer_->close();
     }
-    stop_cv_.notify_all();
 
-    // 等待 poll 线程退出
+    // 等待 poll 线程退出 (poll 使用 timeout，自动检查 stopped_ flag)
     if (poll_thread_.joinable()) {
         poll_thread_.join();
         SPDLOG_INFO("KafkaConsumer::stop: poll thread joined");
     }
 
-    // 关闭 consumer
+    // 清理 consumer
     if (consumer_) {
-        consumer_->unsubscribe();
-        consumer_->close();
         delete consumer_;
         consumer_ = nullptr;
-        SPDLOG_INFO("KafkaConsumer::stop: consumer closed");
+        SPDLOG_INFO("KafkaConsumer::stop: consumer deleted");
     }
 
     running_.store(false, std::memory_order_release);
@@ -213,6 +211,10 @@ int64_t KafkaConsumer::consumerLag() const {
     if (err != RdKafka::ERR_NO_ERROR) {
         SPDLOG_WARN("Failed to get assignment for lag query: {}",
                     errorString(err));
+        // 清理可能已分配的分区
+        for (auto* tp : partitions) {
+            delete tp;
+        }
         return -1;
     }
 
@@ -261,6 +263,10 @@ int64_t KafkaConsumer::committedOffset() const {
     std::vector<RdKafka::TopicPartition*> partitions;
     RdKafka::ErrorCode err = consumer_->assignment(partitions);
     if (err != RdKafka::ERR_NO_ERROR) {
+        // 清理可能已分配的分区
+        for (auto* tp : partitions) {
+            delete tp;
+        }
         return -1;
     }
 
@@ -323,6 +329,30 @@ void KafkaConsumer::pollLoop() {
         case RdKafka::ERR__TIMED_OUT:
         case RdKafka::ERR__PARTITION_EOF:
             // poll 超时或分区 EOF: 投递当前批次
+            if (!batch.empty()) {
+                try {
+                    if (on_batch_) {
+                        on_batch_(std::move(batch));
+                    }
+                } catch (const std::exception& e) {
+                    SPDLOG_ERROR("KafkaConsumer on_batch exception: {}", e.what());
+                }
+                batch.clear();
+                batch.reserve(static_cast<size_t>(config_.max_poll_records));
+            }
+            break;
+
+        case RdKafka::ERR__REVOKE_PARTITIONS:
+            // Rebalance: 分区被撤销，清空当前批次（不投递，等待重新分配）
+            SPDLOG_INFO("KafkaConsumer: partitions revoked, clearing current batch "
+                        "({} messages)", batch.size());
+            batch.clear();
+            batch.reserve(static_cast<size_t>(config_.max_poll_records));
+            break;
+
+        case RdKafka::ERR__ASSIGN_PARTITIONS:
+            // Rebalance: 新分区分配，投递当前批次
+            SPDLOG_INFO("KafkaConsumer: partitions assigned/re-assigned");
             if (!batch.empty()) {
                 try {
                     if (on_batch_) {
