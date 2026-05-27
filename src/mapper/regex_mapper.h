@@ -105,7 +105,7 @@ public:
 
 private:
     /// @brief 当前编译的 RE2 对象
-    std::unique_ptr<re2::RE2> compiled_regex_;
+    std::shared_ptr<re2::RE2> compiled_regex_;
 
     /// @brief 编译缓存: pattern → RE2 对象
     /// @note 使用 mutex 保护，线程安全
