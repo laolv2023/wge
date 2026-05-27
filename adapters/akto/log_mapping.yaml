@@ -1,0 +1,118 @@
+# log_mapping.yaml — Akto API 日志 → HttpAccessEvent 映射配置
+# 适配对象: Akto API Security 平台的 Kafka 输出 (akto.api.logs topic)
+# 输入格式: JSON (嵌套)
+# 特殊处理: requestHeaders/responseHeaders 为 JSON 字符串, 需二次解析
+
+# ===== 全局设置 =====
+mapping:
+  format: "json"
+  encoding: "utf8"
+  on_parse_error: "dlq"
+  event_id_policy: "auto"
+  timestamp_policy: "extract"
+
+# ===== JSON 格式映射 =====
+json:
+  # Akto 日志字段 → WGE Protobuf 字段
+  fields:
+    # 请求信息
+    - source: "path"
+      target: "request_uri"
+      type: "string"
+      default: "/"
+
+    - source: "method"
+      target: "request_method"
+      type: "string"
+      default: "GET"
+
+    - source: "type"
+      target: "request_version"
+      type: "string"
+      default: "1.1"
+      # 前置处理: akto_preprocessor 会将 "HTTP/1.1" → "1.1"
+
+    # 请求体
+    - source: "requestPayload"
+      target: "request_body"
+      type: "bytes"
+      # bytes_encoding: "raw" (JSON 字段, 非 base64)
+
+    - source: "requestPayload.length"
+      target: "request_body_length"
+      type: "int64"
+      default: 0
+
+    # 响应状态码 (Akto 中是 string, 需转为 int32)
+    - source: "statusCode"
+      target: "response_status"
+      type: "int32"
+      default: 0
+
+    # 响应版本 (与请求版本相同)
+    - source: "type"
+      target: "response_version"
+      type: "string"
+      default: "1.1"
+
+    # 响应体
+    - source: "responsePayload"
+      target: "response_body"
+      type: "bytes"
+
+    - source: "responsePayload.length"
+      target: "response_body_length"
+      type: "int64"
+      default: 0
+
+    # 连接信息 (Akto 不提供端口号, 使用默认值)
+    - source: "ip"
+      target: "downstream_ip"
+      type: "string"
+      default: "0.0.0.0"
+
+    - source: "destIp"
+      target: "upstream_ip"
+      type: "string"
+      default: "0.0.0.0"
+
+    # 时间戳 (Akto 使用秒级 epoch, preprocessor 会 ×1000 转为毫秒)
+    - source: "time"
+      target: "timestamp_ms"
+      type: "int64"
+
+    # 采集源标识 (用 akto_account_id 作为 collector)
+    - source: "akto_account_id"
+      target: "collector_id"
+      type: "string"
+      default: "akto-unknown"
+
+  # Header 提取: 使用 embedded 模式
+  # 注意: akto_preprocessor 会先将 JSON 字符串的 headers 展开为结构化数组
+  #       展开后的格式: [{"key":"Accept","value":"application/json"}, ...]
+  header_mode: "embedded"
+
+  headers:
+    request:
+      source: "requestHeaders"        # preprocessor 已展开为结构化数组
+      key_field: "key"
+      value_field: "value"
+    response:
+      source: "responseHeaders"       # preprocessor 已展开为结构化数组
+      key_field: "key"
+      value_field: "value"
+
+# ===== 类型转换规则 =====
+conversions:
+  timestamp_formats:
+    - "%s"                             # Unix epoch seconds (Akto 格式)
+
+  # bytes 字段编码: Akto 中是原始字符串, 非 base64
+  bytes_encoding:
+    request_body: "raw"
+    response_body: "raw"
+
+# ===== 常量注入 =====
+constants:
+  downstream_port: 0                   # Akto 不提供端口号, 设 0
+  upstream_port: 0
