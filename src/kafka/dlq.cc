@@ -113,8 +113,9 @@ void DeadLetterQueue::applySaslConfig(RdKafka::Conf* conf) const {
 }
 
 bool DeadLetterQueue::send(const DeadLetterEvent& event) {
-    if (!producer_) {
-        SPDLOG_ERROR("DeadLetterQueue::send: producer is null");
+    std::lock_guard<std::mutex> lock(send_mutex_);
+    if (closed_ || !producer_) {
+        SPDLOG_ERROR("DeadLetterQueue::send: producer is null or closed");
         return false;
     }
 
@@ -152,8 +153,9 @@ bool DeadLetterQueue::send(const DeadLetterEvent& event) {
 
 bool DeadLetterQueue::sendRaw(const RdKafka::Message& msg,
                                const std::string& error) {
-    if (!producer_) {
-        SPDLOG_ERROR("DeadLetterQueue::sendRaw: producer is null");
+    std::lock_guard<std::mutex> lock(send_mutex_);
+    if (closed_ || !producer_) {
+        SPDLOG_ERROR("DeadLetterQueue::sendRaw: producer is null or closed");
         return false;
     }
 
@@ -185,21 +187,27 @@ bool DeadLetterQueue::sendRaw(const RdKafka::Message& msg,
 }
 
 void DeadLetterQueue::close() {
-    if (closed_) {
-        return;
+    // 先 swap 出 producer_，释放锁后再 flush，防止持锁阻塞 send() 调用者
+    RdKafka::Producer* producer_to_close = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        if (closed_) {
+            return;
+        }
+        closed_ = true;
+        producer_to_close = producer_;
+        producer_ = nullptr;
     }
-    closed_ = true;
 
-    if (producer_) {
+    if (producer_to_close) {
         // Flush 等待所有消息确认 (10s 超时)
-        RdKafka::ErrorCode err = producer_->flush(10'000);
+        RdKafka::ErrorCode err = producer_to_close->flush(10'000);
         if (err != RdKafka::ERR_NO_ERROR) {
             SPDLOG_WARN("DeadLetterQueue::close: flush incomplete: {}",
                         RdKafka::err2str(err));
         }
 
-        delete producer_;
-        producer_ = nullptr;
+        delete producer_to_close;
         SPDLOG_INFO("DeadLetterQueue closed");
     }
 }
