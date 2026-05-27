@@ -1,6 +1,20 @@
 /**
  * @file json_mapper.cc
- * @brief JsonMapper 实现
+ * @brief JsonMapper 实现 — JSON 日志字段提取器
+ *
+ * ## 模块职责
+ * 使用 simdjson（高性能零拷贝 JSON 解析器）从 JSON 格式的原始日志中提取字段。
+ * 支持：
+ * - **点号路径导航**: 如 "request.headers.user_agent" → JSON 深层字段
+ * - **Header 提取**: 两种策略 — Embedded（内嵌对象）和 Prefix（前缀匹配）
+ * - **类型转换**: 自动将 JSON 类型（int/double/bool/null）转为字符串
+ *
+ * ## 关键设计
+ * - **单次解析策略**: extract() 使用 dom 模式一次解析，然后按字段映射逐个导航；
+ *   extractJsonPath() 使用 ondemand 模式实现流式解析
+ * - **simdjson 双模式**:
+ *   - `dom::parser`: 一次性解析整个文档为 DOM 树，适合字段较多的场景
+ *   - `ondemand::parser`: 惰性解析，只解析实际访问的路径，适合单字段查询
  */
 
 #include "mapper/json_mapper.h"
@@ -21,7 +35,17 @@ namespace wge::kafka::mapper {
 namespace {
 
 /**
- * @brief 将 simdjson element 转为字符串表示
+ * @brief 将 simdjson ondemand::value 转换为字符串表示
+ *
+ * 根据 JSON 值的运行时类型进行转换：
+ * - 字符串：直接拷贝
+ * - 整数：std::to_string
+ * - 浮点：std::to_string（注意可能损失精度）
+ * - 布尔："true"/"false"
+ * - null：空字符串
+ *
+ * @param element simdjson ondemand value
+ * @return 字符串表示
  */
 std::string simdjsonValueToString(simdjson::ondemand::value element) {
     using namespace simdjson;
@@ -63,6 +87,12 @@ std::string simdjsonValueToString(simdjson::ondemand::value element) {
 
 /**
  * @brief 将点号分隔的路径拆分为各段
+ *
+ * 例如: "request.headers.user_agent" → ["request", "headers", "user_agent"]
+ * 处理连续点号和首尾点号的情况。
+ *
+ * @param path 点号分隔的路径字符串
+ * @return 路径段 vector（string_view，不拷贝数据）
  */
 std::vector<std::string_view> splitDotPath(std::string_view path) {
     std::vector<std::string_view> segments;
@@ -122,10 +152,12 @@ std::expected<std::string, std::string> JsonMapper::extractJsonPath(
         return std::unexpected(std::string("Empty path"));
     }
 
+    // 使用 ondemand parser：惰性解析，只在访问时展开 JSON 结构
     simdjson::ondemand::parser parser;
     simdjson::ondemand::document doc;
     simdjson::ondemand::value current;
 
+    // 第一步：迭代解析（零拷贝，返回的 string_view 指向原始 buffer）
     auto error = parser.iterate(raw_payload).get(doc);
     if (error) {
         return std::unexpected(
@@ -133,7 +165,7 @@ std::expected<std::string, std::string> JsonMapper::extractJsonPath(
             simdjson::error_message(error));
     }
 
-    // 获取文档根
+    // 获取文档根值（可能是 object、array 或标量）
     error = doc.get_value().get(current);
     if (error) {
         return std::unexpected(
@@ -147,11 +179,12 @@ std::expected<std::string, std::string> JsonMapper::extractJsonPath(
             std::string("Invalid path: '") + std::string(dot_path) + "'");
     }
 
-    // 逐层导航
+    // 逐层导航：每个路径段对应 JSON object 的一个 key
     for (size_t i = 0; i < segments.size(); ++i) {
         std::string_view key = segments[i];
         bool is_last = (i == segments.size() - 1);
 
+        // 当前节点必须是 object 才能按 key 访问子节点
         simdjson::ondemand::object obj;
         error = current.get_object().get(obj);
         if (error) {
@@ -161,6 +194,7 @@ std::expected<std::string, std::string> JsonMapper::extractJsonPath(
                 "', error: " + simdjson::error_message(error));
         }
 
+        // 按 key 获取子节点
         error = obj[key].get(current);
         if (error) {
             if (error == simdjson::error_code::NO_SUCH_FIELD) {
@@ -174,10 +208,11 @@ std::expected<std::string, std::string> JsonMapper::extractJsonPath(
                 "': " + simdjson::error_message(error));
         }
 
-        // 最后一个段：转为字符串
+        // 最后一个段：转为字符串并返回
         if (is_last) {
             return simdjsonValueToString(current);
         }
+        // 中间段：继续循环导航
     }
 
     return std::unexpected(
@@ -196,10 +231,11 @@ JsonMapper::extract(std::string_view raw_payload,
         return std::unexpected(std::string("Empty JSON payload"));
     }
 
-    // 一次性解析 JSON，避免每个字段重复解析
+    // 一次性解析 JSON（dom 模式），避免每个字段重复解析
+    // dom::parser 将整个 JSON 解析为内存 DOM 树，适合多字段提取
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    simdjson::padded_string padded(raw_payload);
+    simdjson::padded_string padded(raw_payload);  // simdjson 要求 padded 输入
     auto error = parser.parse(padded).get(doc);
     if (error) {
         return std::unexpected(
@@ -209,8 +245,9 @@ JsonMapper::extract(std::string_view raw_payload,
 
     std::map<std::string, std::string> result;
 
+    // 遍历每个字段映射，从 DOM 树中提取对应值
     for (const auto& mapping : field_mappings) {
-        if (mapping.source.empty()) continue;
+        if (mapping.source.empty()) continue;  // 跳过空源路径
 
         auto segments = splitDotPath(mapping.source);
         if (segments.empty()) {
@@ -220,12 +257,12 @@ JsonMapper::extract(std::string_view raw_payload,
                     "' (→ " + mapping.target + ") has empty path");
             }
             if (mapping.default_value.has_value()) {
-                result[mapping.target] = *mapping.default_value;
+                result[mapping.target] = *mapping.default_value;  // 使用默认值
             }
             continue;
         }
 
-        // 从根节点出发导航
+        // 从根节点出发导航 DOM 树
         simdjson::dom::element current = doc;
         bool found = true;
         std::string nav_error;
@@ -234,6 +271,7 @@ JsonMapper::extract(std::string_view raw_payload,
             std::string_view key = segments[i];
             bool is_last = (i == segments.size() - 1);
 
+            // 当前节点必须是 OBJECT 才能按 key 访问子节点
             if (current.type() != simdjson::dom::element_type::OBJECT) {
                 found = false;
                 nav_error = std::string("Path segment '") + std::string(key) +
@@ -256,16 +294,19 @@ JsonMapper::extract(std::string_view raw_payload,
             simdjson::dom::element child = child_err.value_unsafe();
 
             if (is_last) {
+                // 到达目标：转为字符串存入结果
                 result[mapping.target] = domElementToString(child);
                 spdlog::trace("Field '{}' → '{}' = '{}'", mapping.source,
                               mapping.target, result[mapping.target]);
                 break;
             }
-            current = child;
+            current = child;  // 继续导航下一层
         }
 
+        // 字段未找到时的处理
         if (!found) {
             if (mapping.required) {
+                // 必填字段缺失 → 返回错误
                 if (nav_error.empty()) {
                     return std::unexpected(
                         std::string("Required field '") + mapping.source +
@@ -273,6 +314,7 @@ JsonMapper::extract(std::string_view raw_payload,
                 }
                 return std::unexpected(nav_error);
             }
+            // 可选字段缺失 → 使用默认值或跳过
             if (mapping.default_value.has_value()) {
                 result[mapping.target] = *mapping.default_value;
                 spdlog::trace("Field '{}' → '{}': using default '{}'",
