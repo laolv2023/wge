@@ -104,21 +104,38 @@ void WalWriter::write(const std::shared_ptr<WgeAlertEvent>& alert) {
     std::string json_line = serializeToJsonLine(*alert);
 
     // 追加写入
-    std::fwrite(json_line.data(), 1, json_line.size(), current_file_);
+    size_t written = std::fwrite(json_line.data(), 1, json_line.size(), current_file_);
+    if (written != json_line.size()) {
+        SPDLOG_ERROR("WalWriter::write: short write: {} of {} bytes written (ferror={})",
+                     written, json_line.size(), std::ferror(current_file_));
+        if (std::ferror(current_file_)) {
+            throw std::runtime_error(
+                "WalWriter::write: fwrite failed: " +
+                std::string(std::strerror(errno)));
+        }
+        // 非错误原因的短写，重试一次
+        size_t remaining = json_line.size() - written;
+        size_t written2 = std::fwrite(json_line.data() + written, 1, remaining, current_file_);
+        if (written2 != remaining) {
+            throw std::runtime_error(
+                "WalWriter::write: fwrite retry failed: wrote " +
+                std::to_string(written + written2) + " of " +
+                std::to_string(json_line.size()) + " bytes");
+        }
+    }
 
     // 追加换行符
     std::fputc('\n', current_file_);
 
-    // 检查写入错误
-    if (std::ferror(current_file_)) {
-        throw std::runtime_error(
-            "WalWriter::write: fwrite failed: " +
-            std::string(std::strerror(errno)));
-    }
-
     // 强制刷盘，确保崩溃时数据不丢失
     std::fflush(current_file_);
-    ::fsync(::fileno(current_file_));
+    int fd = ::fileno(current_file_);
+    if (fd < 0) {
+        SPDLOG_ERROR("WalWriter::write: fileno() returned {} (errno={}), skipping fsync",
+                     fd, errno);
+    } else {
+        ::fsync(fd);
+    }
 
     SPDLOG_DEBUG("WalWriter: wrote alert_id={} to {} ({} bytes)",
                  alert->alert_id(), current_file_path_, json_line.size());
