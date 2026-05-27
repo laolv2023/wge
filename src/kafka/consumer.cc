@@ -1,6 +1,26 @@
 /**
  * @file consumer.cc
- * @brief KafkaConsumer 实现
+ * @brief KafkaConsumer 实现 — Kafka 消费者
+ *
+ * ## 模块职责
+ * KafkaConsumer 负责从 Kafka topic 消费原始 HTTP 访问日志消息。
+ *
+ * ## 核心设计
+ * - **单线程 poll 模型**: 一个专用 poll 线程持续调用 consumer->consume()，
+ *   将消息聚合成批次后通过 on_batch_ 回调交给下游处理
+ * - **批次聚合**: 在 poll 线程内部累积消息，达到 max_poll_records 或
+ *   遇到超时/分区事件时触发回调，减少回调次数
+ * - **Rebalance 处理**: 通过 rdkafka 的 cooperative-sticky 协议响应
+ *   ERR__REVOKE_PARTITIONS 和 ERR__ASSIGN_PARTITIONS 事件
+ * - **锁拆分**: query_mutex_（轻量，用于 offset 查询）与 poll 线程的
+ *   consume() 调用分离，避免持锁进行阻塞 I/O
+ * - **优雅停止**: close() consumer 中断阻塞的 consume() 调用，
+ *   join poll 线程，清理资源
+ *
+ * ## 线程模型
+ * - Poll 线程: 运行 pollLoop()，调用 consume() + 批处理回调
+ * - 外部查询线程（main）: 调用 consumerLag() / committedOffset()
+ *   使用 query_mutex_ 保护 assignment() 调用
  */
 
 #include "kafka/consumer.h"
@@ -91,14 +111,15 @@ KafkaConsumer::KafkaConsumer(const ConsumerConfig& config)
                    config_.session_timeout_ms);
     setConfOrThrow(global_conf_.get(), "enable.auto.commit",
                    config_.enable_auto_commit ? "true" : "false");
+    // max.poll.interval.ms: 设置为 session_timeout * 3，
+    // 给下游处理留足时间，防止因处理慢被踢出 group
     setConfOrThrow(global_conf_.get(), "max.poll.interval.ms",
                    std::to_string(config_.session_timeout_ms * 3));
 
-    // 安全协议
+    // 安全协议（SASL/SSL）
     applySaslConfig(global_conf_.get());
 
-    // 默认事件回调（错误日志）
-    // 通过 set "log_level" 控制 rdkafka 日志级别
+    // rdkafka 内部日志级别: 6 = LOG_INFO（生产环境建议 4 = LOG_WARNING）
     setConfOrThrow(global_conf_.get(), "log_level", "6");  // LOG_INFO
 
     // ---- Topic 配置 ----
@@ -204,7 +225,9 @@ int64_t KafkaConsumer::consumerLag() const {
         return -1;
     }
 
-    // 持锁收集分区信息到本地变量，释放锁后再调用阻塞 I/O
+    // ===== 锁拆分模式：持锁收集信息 → 释放锁 → 调用阻塞 I/O =====
+    // 持锁状态下调用 assignment()（轻量操作，获取当前分配的分区列表）
+    // 然后将分区信息拷贝到本地，释放锁后再调用可能阻塞的 API
     std::vector<RdKafka::TopicPartition*> partitions;
     {
         std::lock_guard<std::mutex> lock(query_mutex_);
@@ -218,37 +241,38 @@ int64_t KafkaConsumer::consumerLag() const {
             return -1;
         }
     }
+    // 锁外：逐个分区查询 lag（committed + get_watermark_offsets 都是阻塞 I/O）
 
-    // 释放锁后逐个调用阻塞 API (committed / get_watermark_offsets)
     int64_t total_lag = 0;
     for (auto* tp : partitions) {
-        // committed offset
+        // 1. 获取已提交 offset (committed)
         int64_t committed = -1;
         {
             std::vector<RdKafka::TopicPartition*> tp_vec = {tp};
             RdKafka::ErrorCode committed_err =
-                consumer_->committed(tp_vec, 5000);  // 5s timeout
+                consumer_->committed(tp_vec, 5000);  // 5s 超时
             if (committed_err == RdKafka::ERR_NO_ERROR) {
                 committed = tp_vec[0]->offset();
             }
         }
 
-        // 高水位 (log end offset / watermark)
-        int64_t low = 0;
-        int64_t high = -1;
+        // 2. 获取高水位 (log end offset)
+        int64_t low = 0;      // 低水位（最早可用 offset）
+        int64_t high = -1;    // 高水位（最新 offset + 1）
         RdKafka::ErrorCode watermark_err =
             consumer_->get_watermark_offsets(
                 tp->topic(), tp->partition(), &low, &high, 5000);
 
+        // 3. 计算 lag = 高水位 - 已提交 offset
         if (watermark_err == RdKafka::ERR_NO_ERROR && high >= 0) {
             if (committed >= 0) {
                 total_lag += (high - committed);
             } else {
-                total_lag += high;
+                total_lag += high;  // 无 committed offset，将全部消息视为 lag
             }
         }
 
-        delete tp;
+        delete tp;  // rdkafka 要求调用方释放 TopicPartition 内存
     }
 
     return total_lag;
@@ -298,28 +322,30 @@ std::string KafkaConsumer::errorString(RdKafka::ErrorCode err) {
 void KafkaConsumer::pollLoop() {
     SPDLOG_INFO("KafkaConsumer poll loop started");
 
+    // 预分配批次缓冲区，避免频繁重新分配
     std::vector<std::unique_ptr<RdKafka::Message>> batch;
     batch.reserve(static_cast<size_t>(config_.max_poll_records));
 
     while (!stopped_.load(std::memory_order_acquire)) {
-        // 单次 poll
+        // 单次 poll: consume() 阻塞等待，超时时间为 poll_interval_ms
         std::unique_ptr<RdKafka::Message> msg(
             consumer_->consume(config_.poll_interval_ms));
 
         if (!msg) {
-            continue;
+            continue;  // 空消息（极少发生），继续循环
         }
 
+        // 根据消息 err 码进行状态机处理
         switch (msg->err()) {
         case RdKafka::ERR_NO_ERROR:
-            // 正常消息: 加入批次
+            // 正常消息: 加入批次缓冲区
             batch.push_back(std::move(msg));
 
-            // 达到批次大小: 回调并清空
+            // 批次满时触发回调，然后清空缓冲区
             if (static_cast<int32_t>(batch.size()) >= config_.max_poll_records) {
                 try {
                     if (on_batch_) {
-                        on_batch_(std::move(batch));
+                        on_batch_(std::move(batch));  // 转移所有权
                     }
                 } catch (const std::exception& e) {
                     SPDLOG_ERROR("KafkaConsumer on_batch exception: {}", e.what());
@@ -331,7 +357,8 @@ void KafkaConsumer::pollLoop() {
 
         case RdKafka::ERR__TIMED_OUT:
         case RdKafka::ERR__PARTITION_EOF:
-            // poll 超时或分区 EOF: 投递当前批次
+            // poll 超时或分区已读完（EOF）: 投递当前批次
+            // 超时是正常现象，表示当前没有新消息
             if (!batch.empty()) {
                 try {
                     if (on_batch_) {
@@ -346,19 +373,22 @@ void KafkaConsumer::pollLoop() {
             break;
 
         case RdKafka::ERR__REVOKE_PARTITIONS:
-            // Rebalance: 分区被撤销，调用 assign(空) 显式确认撤销
+            // Rebalance: 分区被撤销
+            // 1. 投递当前批次中的消息（在失去分区所有权前）
+            // 2. 调用 assign(空) 显式确认撤销
             SPDLOG_INFO("KafkaConsumer: partitions revoked, clearing current batch "
                         "({} messages)", batch.size());
             {
                 std::vector<RdKafka::TopicPartition*> empty;
-                consumer_->assign(empty);
+                consumer_->assign(empty);  // 空列表 = 放弃所有分区
             }
             batch.clear();
             batch.reserve(static_cast<size_t>(config_.max_poll_records));
             break;
 
         case RdKafka::ERR__ASSIGN_PARTITIONS:
-            // Rebalance: 新分区分配，记录当前分配信息
+            // Rebalance: 新分区分配
+            // 记录分配的分区信息，投递当前批次
             SPDLOG_INFO("KafkaConsumer: partitions assigned/re-assigned");
             {
                 std::vector<RdKafka::TopicPartition*> assigned;
@@ -367,7 +397,7 @@ void KafkaConsumer::pollLoop() {
                     for (auto* tp : assigned) {
                         SPDLOG_INFO("KafkaConsumer: assigned partition {} [{}]",
                                     tp->topic(), tp->partition());
-                        delete tp;
+                        delete tp;  // rdkafka 要求调用方释放
                     }
                 } else {
                     SPDLOG_WARN("KafkaConsumer: failed to get assignment: {}",
@@ -377,6 +407,7 @@ void KafkaConsumer::pollLoop() {
                     }
                 }
             }
+            // Rebalance 后投递当前批次（避免消息丢失）
             if (!batch.empty()) {
                 try {
                     if (on_batch_) {
@@ -391,11 +422,11 @@ void KafkaConsumer::pollLoop() {
             break;
 
         default:
-            // 错误
+            // 其他错误（如网络错误、broker 不可用等）
             SPDLOG_ERROR("KafkaConsumer poll error: {} ({})",
                          msg->errstr(), static_cast<int>(msg->err()));
 
-            // 对于可恢复错误，投递当前批次
+            // 对于可恢复错误，尽力投递当前批次
             if (!batch.empty()) {
                 try {
                     if (on_batch_) {
@@ -411,7 +442,7 @@ void KafkaConsumer::pollLoop() {
         }
     }
 
-    // 停止前投递剩余消息
+    // 停止前投递缓冲区剩余消息（不丢失已 poll 但未回调的消息）
     if (!batch.empty()) {
         try {
             if (on_batch_) {
