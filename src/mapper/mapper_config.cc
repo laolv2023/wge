@@ -103,16 +103,16 @@ std::expected<HeaderStrategy, std::string> parseHeaderStrategy(
 /**
  * @brief 解析 HeaderExtractionConfig 从 YAML
  */
-void parseHeaderExtraction(const YAML::Node& node,
-                           HeaderExtractionConfig& cfg) {
-    if (!node) return;
+std::expected<void, std::string> parseHeaderExtraction(const YAML::Node& node,
+                               HeaderExtractionConfig& cfg) {
+    if (!node) return {};
 
     if (node["strategy"]) {
         auto result = parseHeaderStrategy(node["strategy"].as<std::string>());
         if (result) {
             cfg.strategy = *result;
         } else {
-            spdlog::warn("Invalid header strategy: {}", result.error());
+            return std::unexpected(result.error());
         }
     }
 
@@ -128,6 +128,7 @@ void parseHeaderExtraction(const YAML::Node& node,
     if (node["normalize_keys"]) {
         cfg.normalize_keys = node["normalize_keys"].as<bool>();
     }
+    return {};
 }
 
 /**
@@ -298,14 +299,16 @@ std::expected<MapperConfig, std::string> MapperConfig::loadFromFile(
 
         // 解析 request_headers
         if (root["request_headers"]) {
-            parseHeaderExtraction(root["request_headers"],
+            auto req_result = parseHeaderExtraction(root["request_headers"],
                                   config.request_headers);
+            if (!req_result) return std::unexpected(req_result.error());
         }
 
         // 解析 response_headers
         if (root["response_headers"]) {
-            parseHeaderExtraction(root["response_headers"],
+            auto resp_result = parseHeaderExtraction(root["response_headers"],
                                   config.response_headers);
+            if (!resp_result) return std::unexpected(resp_result.error());
         }
 
         // 解析 timestamp_config
