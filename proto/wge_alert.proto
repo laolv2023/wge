@@ -1,0 +1,54 @@
+syntax = "proto3";
+package wge.kafka;
+
+// Kafka output topic: wge-alert
+message WgeAlertEvent {
+  string  alert_id        = 1;   // UUID v7
+  int64   timestamp_ms    = 2;   // 检测时间
+
+  // ---- 关联 ----
+  string  event_id        = 10;  // 关联原始 HttpAccessEvent.event_id
+  string  collector_id    = 11;  // 采集源
+
+  // ---- 检测结果 ----
+  bool    intervened      = 20;  // 是否触发拦截动作
+  string  disruptive_action = 21; // DENY/DROP/REDIRECT/ALLOW 等
+  int32   response_code   = 22;  // 规则设定的 HTTP 状态码
+  string  redirect_url    = 23;  // REDIRECT 目标 URL
+
+  // ---- 匹配规则 ----
+  repeated MatchedRule matched_rules = 30;
+
+  // ---- 原始请求摘要 (用于告警展示，不含 body) ----
+  string  request_method  = 40;
+  string  request_uri     = 41;
+  string  downstream_ip   = 42;
+  string  upstream_ip     = 43;
+}
+
+message MatchedRule {
+  uint64  rule_id         = 1;   // SecRule id
+  string  rule_msg        = 2;
+  string  rule_severity   = 3;  // CRITICAL/ERROR/WARNING/NOTICE
+  string  rule_ver        = 4;  // 规则集版本
+  repeated string rule_tags = 5;
+
+  // 匹配变量
+  string  matched_var_name   = 10;
+  string  matched_var_value   = 11;  // 变换后的值
+  string  matched_var_original = 12; // 原始值
+
+  // 匹配操作
+  string  operator_name   = 20;  // @rx / @detectSQLi / @xss 等
+  string  operator_param  = 21;  // 正则表达式等
+}
+
+// Kafka DLQ topic: http-access-dlq
+message DeadLetterEvent {
+  string  original_topic    = 1;
+  int32   original_partition = 2;
+  int64   original_offset   = 3;
+  bytes   original_payload  = 4;  // 原始消息
+  string  error_message     = 5;
+  int64   timestamp_ms      = 6;
+}
