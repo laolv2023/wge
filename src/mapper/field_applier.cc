@@ -5,6 +5,7 @@
 
 #include "mapper/field_applier.h"
 
+#include <cerrno>
 #include <charconv>
 #include <cstring>
 #include <stdexcept>
@@ -335,8 +336,9 @@ int64_t FieldApplier::parseTimestamp(
             char* end = strptime(raw.c_str(), fmt.c_str(), &tm);
             if (end != nullptr && *end == '\0') {
                 tm.tm_isdst = -1;
+                errno = 0;
                 auto epoch = timegm(&tm);
-                if (epoch != static_cast<time_t>(-1)) {
+                if (errno == 0) {
                     return static_cast<int64_t>(epoch) * 1000;
                 }
             }
@@ -386,8 +388,9 @@ int64_t FieldApplier::parseTimestamp(
             tm.tm_mon -= 1;
             tm.tm_isdst = -1;
 
+            errno = 0;
             auto epoch = timegm(&tm);
-            if (epoch != static_cast<time_t>(-1)) {
+            if (errno == 0) {
                 int64_t result = static_cast<int64_t>(epoch) * 1000 + ms;
 
                 if (parsed >= 9) {
@@ -427,8 +430,9 @@ int64_t FieldApplier::parseTimestamp(
                 tm.tm_mon = mon;
                 tm.tm_year -= 1900;
                 tm.tm_isdst = -1;
+                errno = 0;
                 auto epoch = timegm(&tm);
-                if (epoch != static_cast<time_t>(-1)) {
+                if (errno == 0) {
                     int64_t result = static_cast<int64_t>(epoch) * 1000;
                     int tz_offset = tz_h * 3600 + tz_m * 60;
                     if (tz_sign_c == '-') tz_offset = -tz_offset;
@@ -505,15 +509,6 @@ int FieldApplier::hexCharToNibble(char c) noexcept {
 std::string FieldApplier::base64Decode(std::string_view encoded) {
     static const char kBase64Table[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    // 构建反向查找表
-    static const int kDecodeTable = []() {
-        static int table[256];
-        for (int i = 0; i < 256; ++i) table[i] = -1;
-        for (int i = 0; i < 64; ++i)
-            table[static_cast<unsigned char>(kBase64Table[i])] = i;
-        return 0;  // 触发编译期初始化
-    }();
 
     // 实际使用 std::find 方式
     auto decode_char = [](unsigned char c) -> int {
