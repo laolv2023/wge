@@ -204,21 +204,22 @@ int64_t KafkaConsumer::consumerLag() const {
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(query_mutex_);
-
+    // 持锁收集分区信息到本地变量，释放锁后再调用阻塞 I/O
     std::vector<RdKafka::TopicPartition*> partitions;
-    RdKafka::ErrorCode err = consumer_->assignment(partitions);
-    if (err != RdKafka::ERR_NO_ERROR) {
-        SPDLOG_WARN("Failed to get assignment for lag query: {}",
-                    errorString(err));
-        // 清理可能已分配的分区
-        for (auto* tp : partitions) {
-            delete tp;
+    {
+        std::lock_guard<std::mutex> lock(query_mutex_);
+        RdKafka::ErrorCode err = consumer_->assignment(partitions);
+        if (err != RdKafka::ERR_NO_ERROR) {
+            SPDLOG_WARN("Failed to get assignment for lag query: {}",
+                        errorString(err));
+            for (auto* tp : partitions) {
+                delete tp;
+            }
+            return -1;
         }
-        return -1;
     }
 
-    // 查询每个分区的高水位 offset
+    // 释放锁后逐个调用阻塞 API (committed / get_watermark_offsets)
     int64_t total_lag = 0;
     for (auto* tp : partitions) {
         // committed offset
@@ -258,18 +259,20 @@ int64_t KafkaConsumer::committedOffset() const {
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(query_mutex_);
-
+    // 持锁收集分区信息到本地变量，释放锁后再调用阻塞 I/O
     std::vector<RdKafka::TopicPartition*> partitions;
-    RdKafka::ErrorCode err = consumer_->assignment(partitions);
-    if (err != RdKafka::ERR_NO_ERROR) {
-        // 清理可能已分配的分区
-        for (auto* tp : partitions) {
-            delete tp;
+    {
+        std::lock_guard<std::mutex> lock(query_mutex_);
+        RdKafka::ErrorCode err = consumer_->assignment(partitions);
+        if (err != RdKafka::ERR_NO_ERROR) {
+            for (auto* tp : partitions) {
+                delete tp;
+            }
+            return -1;
         }
-        return -1;
     }
 
+    // 释放锁后逐个调用阻塞 API
     int64_t total_committed = 0;
     for (auto* tp : partitions) {
         std::vector<RdKafka::TopicPartition*> tp_vec = {tp};
@@ -343,16 +346,37 @@ void KafkaConsumer::pollLoop() {
             break;
 
         case RdKafka::ERR__REVOKE_PARTITIONS:
-            // Rebalance: 分区被撤销，清空当前批次（不投递，等待重新分配）
+            // Rebalance: 分区被撤销，调用 assign(空) 显式确认撤销
             SPDLOG_INFO("KafkaConsumer: partitions revoked, clearing current batch "
                         "({} messages)", batch.size());
+            {
+                std::vector<RdKafka::TopicPartition*> empty;
+                consumer_->assign(empty);
+            }
             batch.clear();
             batch.reserve(static_cast<size_t>(config_.max_poll_records));
             break;
 
         case RdKafka::ERR__ASSIGN_PARTITIONS:
-            // Rebalance: 新分区分配，投递当前批次
+            // Rebalance: 新分区分配，记录当前分配信息
             SPDLOG_INFO("KafkaConsumer: partitions assigned/re-assigned");
+            {
+                std::vector<RdKafka::TopicPartition*> assigned;
+                RdKafka::ErrorCode assign_err = consumer_->assignment(assigned);
+                if (assign_err == RdKafka::ERR_NO_ERROR) {
+                    for (auto* tp : assigned) {
+                        SPDLOG_INFO("KafkaConsumer: assigned partition {} [{}]",
+                                    tp->topic(), tp->partition());
+                        delete tp;
+                    }
+                } else {
+                    SPDLOG_WARN("KafkaConsumer: failed to get assignment: {}",
+                                errorString(assign_err));
+                    for (auto* tp : assigned) {
+                        delete tp;
+                    }
+                }
+            }
             if (!batch.empty()) {
                 try {
                     if (on_batch_) {
