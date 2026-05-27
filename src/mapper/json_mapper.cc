@@ -82,6 +82,31 @@ std::vector<std::string_view> splitDotPath(std::string_view path) {
     return segments;
 }
 
+/**
+ * @brief 将 simdjson dom::element 转为字符串表示
+ */
+std::string domElementToString(simdjson::dom::element element) {
+    using namespace simdjson;
+    switch (element.type()) {
+        case dom::element_type::STRING: {
+            std::string_view sv = element.get_string().value_unsafe();
+            return std::string(sv);
+        }
+        case dom::element_type::INT64:
+            return std::to_string(element.get_int64().value_unsafe());
+        case dom::element_type::UINT64:
+            return std::to_string(element.get_uint64().value_unsafe());
+        case dom::element_type::DOUBLE:
+            return std::to_string(element.get_double().value_unsafe());
+        case dom::element_type::BOOL:
+            return element.get_bool().value_unsafe() ? "true" : "false";
+        case dom::element_type::NULL_VALUE:
+            return std::string("");
+        default:
+            return std::string("");
+    }
+}
+
 }  // namespace
 
 // ============================================================================
@@ -167,20 +192,87 @@ std::expected<std::string, std::string> JsonMapper::extractJsonPath(
 std::expected<std::map<std::string, std::string>, std::string>
 JsonMapper::extract(std::string_view raw_payload,
                     const std::vector<FieldMapping>& field_mappings) const {
+    if (raw_payload.empty()) {
+        return std::unexpected(std::string("Empty JSON payload"));
+    }
+
+    // 一次性解析 JSON，避免每个字段重复解析
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    simdjson::padded_string padded(raw_payload);
+    auto error = parser.parse(padded).get(doc);
+    if (error) {
+        return std::unexpected(
+            std::string("JSON parse error: ") +
+            simdjson::error_message(error));
+    }
+
     std::map<std::string, std::string> result;
 
     for (const auto& mapping : field_mappings) {
         if (mapping.source.empty()) continue;
 
-        auto value_result = extractJsonPath(raw_payload, mapping.source);
-        if (!value_result) {
+        auto segments = splitDotPath(mapping.source);
+        if (segments.empty()) {
             if (mapping.required) {
                 return std::unexpected(
                     std::string("Required field '") + mapping.source +
-                    "' (→ " + mapping.target + ") not found: " +
-                    value_result.error());
+                    "' (→ " + mapping.target + ") has empty path");
             }
-            // Optional 字段使用默认值
+            if (mapping.default_value.has_value()) {
+                result[mapping.target] = *mapping.default_value;
+            }
+            continue;
+        }
+
+        // 从根节点出发导航
+        simdjson::dom::element current = doc;
+        bool found = true;
+        std::string nav_error;
+
+        for (size_t i = 0; i < segments.size(); ++i) {
+            std::string_view key = segments[i];
+            bool is_last = (i == segments.size() - 1);
+
+            if (current.type() != simdjson::dom::element_type::OBJECT) {
+                found = false;
+                nav_error = std::string("Path segment '") + std::string(key) +
+                    "': expected object at '" + mapping.source + "'";
+                break;
+            }
+
+            simdjson::dom::object obj = current.get_object().value_unsafe();
+            auto child_err = obj[key];
+            if (child_err.error()) {
+                found = false;
+                if (child_err.error() != simdjson::NO_SUCH_FIELD) {
+                    nav_error = std::string("Error accessing '") +
+                        std::string(key) + "' in path '" + mapping.source +
+                        "': " + simdjson::error_message(child_err.error());
+                }
+                break;
+            }
+
+            simdjson::dom::element child = child_err.value_unsafe();
+
+            if (is_last) {
+                result[mapping.target] = domElementToString(child);
+                spdlog::trace("Field '{}' → '{}' = '{}'", mapping.source,
+                              mapping.target, result[mapping.target]);
+                break;
+            }
+            current = child;
+        }
+
+        if (!found) {
+            if (mapping.required) {
+                if (nav_error.empty()) {
+                    return std::unexpected(
+                        std::string("Required field '") + mapping.source +
+                        "' (→ " + mapping.target + ") not found");
+                }
+                return std::unexpected(nav_error);
+            }
             if (mapping.default_value.has_value()) {
                 result[mapping.target] = *mapping.default_value;
                 spdlog::trace("Field '{}' → '{}': using default '{}'",
@@ -190,12 +282,7 @@ JsonMapper::extract(std::string_view raw_payload,
                 spdlog::trace("Field '{}' → '{}': not found, skipping",
                               mapping.source, mapping.target);
             }
-            continue;
         }
-
-        result[mapping.target] = std::move(*value_result);
-        spdlog::trace("Field '{}' → '{}' = '{}'", mapping.source,
-                      mapping.target, result[mapping.target]);
     }
 
     return result;
