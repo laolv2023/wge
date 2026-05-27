@@ -1,6 +1,17 @@
 /**
  * @file alert_builder.cc
- * @brief AlertBuilder 实现
+ * @brief AlertBuilder 实现 — 告警构建器
+ *
+ * ## 模块职责
+ * AlertBuilder 将检测结果（AlertResult）和原始事件信息组合，
+ * 构建 WgeAlertEvent protobuf 消息。
+ *
+ * ## 功能
+ * - **UUID v7 生成**: 基于时间戳的 UUID（毫秒精度），保证告警 ID 全局唯一且可排序
+ * - **时间戳补全**: 若 result 中无时间戳，使用当前系统时间
+ * - **阻断动作映射**: 根据 intervened/response_code/redirect_url 推导 disruptive_action
+ *   (ALLOW / DENY / DROP / REDIRECT)
+ * - **匹配规则填充**: 将 matched_rules 列表写入 protobuf repeated 字段
  */
 
 #include "detector/alert_builder.h"
@@ -21,45 +32,50 @@ namespace wge::kafka::detector {
 // ============================================================================
 
 std::string AlertBuilder::generateUuidV7() {
-    // UUID v7: Unix epoch ms (48 bits) + version (4 bits) +
-    //           random a (12 bits) + variant (2 bits) + random b (62 bits)
+    // UUID v7 格式 (RFC 9562):
+    //   timestamp_ms (48 bits) + version (4 bits) +
+    //   random_a (12 bits) + variant (2 bits) + random_b (62 bits)
+    //
+    // 格式: 00000000-0000-7xxx-yxxx-xxxxxxxxxxxx
+    // - 前 12 hex 位: Unix 毫秒时间戳（单调递增）
+    // - 第 13 位:    版本号固定为 7
+    // - 第 17 位:    变体固定为 10xx (0x8-0xB)
 
     using clock = std::chrono::system_clock;
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       clock::now().time_since_epoch())
                       .count();
 
-    // 线程安全的随机数生成
+    // 线程安全的随机数生成（thread_local + mt19937_64）
     thread_local std::random_device rd;
     thread_local std::mt19937_64 gen(rd());
     thread_local std::uniform_int_distribution<uint64_t> dist;
 
-    uint64_t rand_a = dist(gen) & 0xFFF;        // 12 bits
-    uint64_t rand_b_hi = dist(gen) & 0x3FFFFFFFFFFFFFFFULL;  // 62 bits (high)
-    uint64_t rand_b_lo = dist(gen);             // 64 bits (low)
+    uint64_t rand_a = dist(gen) & 0xFFF;        // 12 bits 随机部分 A
+    uint64_t rand_b_hi = dist(gen) & 0x3FFFFFFFFFFFFFFFULL;  // 62 bits 高位
+    uint64_t rand_b_lo = dist(gen);             // 64 bits 低位
 
-    // Format: 00000000-0000-7xxx-yxxx-xxxxxxxxxxxx
-    // timestamp_ms (48 bits) 填满前 12 hex digits
+    // 时间戳: 取低 48 bits（支持到公元 10889 年）
     uint64_t ts = static_cast<uint64_t>(now_ms) & 0xFFFFFFFFFFFFULL;
 
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
 
-    // time_low (8 hex)
+    // time_low: timestamp 的 [47:32] 位 → 8 hex
     oss << std::setw(8) << (ts >> 16);
     oss << '-';
-    // time_mid (4 hex)
+    // time_mid: timestamp 的 [31:16] 位 → 4 hex
     oss << std::setw(4) << (ts & 0xFFFF);
     oss << '-';
-    // version (7) + time_high (3 hex)
+    // version (7) + time_high (12 bits): '7' + 3 hex (rand_a 高 4 位填满)
     oss << '7' << std::setw(3) << ((rand_a >> 8) & 0xFFF);
     oss << '-';
-    // variant (10xx) + rand_a[7:0]
-    uint16_t variant_byte = 0x80 | ((rand_a >> 4) & 0x3F);
+    // variant (10xx) + rand_a[7:0]: variant_byte = 0x80 | (rand_a 中 6 bits)
+    uint16_t variant_byte = 0x80 | ((rand_a >> 4) & 0x3F);  // 0x80 = 0b10000000
     oss << std::setw(2) << variant_byte;
-    oss << std::setw(2) << (rand_a & 0xFF);
+    oss << std::setw(2) << (rand_a & 0xFF);  // rand_a 低 8 位
     oss << '-';
-    // rand_b (12 hex)
+    // rand_b: 12 hex (48 bits of rand_b_lo)
     oss << std::setw(12) << (rand_b_lo & 0xFFFFFFFFFFFFULL);
 
     return oss.str();
