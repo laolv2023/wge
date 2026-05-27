@@ -28,6 +28,43 @@
 namespace wge::kafka::wal {
 
 // ============================================================================
+// 简易 base64 解码 (与 WalWriter 的 base64 编码配对)
+// ============================================================================
+
+namespace {
+
+int base64CharValue(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;  // invalid
+}
+
+std::string base64Decode(const std::string& input) {
+    std::string output;
+    output.reserve((input.size() * 3) / 4);
+
+    int val = 0;
+    int valb = -8;
+    for (char c : input) {
+        if (c == '=') break;
+        int v = base64CharValue(c);
+        if (v < 0) continue;  // skip invalid chars (e.g. whitespace)
+        val = (val << 6) + v;
+        valb += 6;
+        if (valb >= 0) {
+            output.push_back(static_cast<char>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return output;
+}
+
+}  // namespace
+
+// ============================================================================
 // 构造与析构
 // ============================================================================
 
@@ -125,8 +162,9 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
             }
 
             // 匹配 WAL 文件命名: alert-*.log
+            // 最小长度: "alert-" (6) + ".log" (4) = 10
             std::string name(entry->d_name);
-            if (name.size() < 5 || name.substr(0, 6) != "alert-" ||
+            if (name.size() < 10 || name.substr(0, 6) != "alert-" ||
                 name.substr(name.size() - 4) != ".log") {
                 continue;
             }
@@ -231,8 +269,9 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
             continue;
         }
 #else
-        // Fallback: try binary parsing if JSON not available
-        if (!alert->ParseFromString(json_line)) {
+        // Fallback: base64 解码 → 二进制 protobuf 解析 (与 WalWriter 编码配对)
+        std::string binary = base64Decode(json_line);
+        if (!alert->ParseFromString(binary)) {
             SPDLOG_WARN("WalRelay: failed to parse WAL line from '{}' "
                         "(protobuf JSON util not available)",
                         file_path);
@@ -272,6 +311,16 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
             if (std::rename(tmp_path.c_str(), file_path.c_str()) != 0) {
                 SPDLOG_ERROR("WalRelay: failed to rename tmp file: {}",
                              std::strerror(errno));
+                std::remove(tmp_path.c_str());
+                // rename 失败: 将原始文件移到 .failed 后缀，防止下次扫描重复补发
+                std::string failed_path = file_path + ".failed";
+                if (std::rename(file_path.c_str(), failed_path.c_str()) != 0) {
+                    SPDLOG_ERROR("WalRelay: failed to rename to .failed '{}': {}",
+                                 failed_path, std::strerror(errno));
+                } else {
+                    SPDLOG_WARN("WalRelay: original file renamed to '{}' for manual handling",
+                                failed_path);
+                }
             }
         }
         SPDLOG_INFO("WalRelay: {} of {} alerts relayed from '{}', "
