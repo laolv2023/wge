@@ -154,6 +154,11 @@ void FieldApplier::setInt32Field(HttpAccessEvent& event,
             reflection->SetInt32(&event, fd, result);
             break;
         case google::protobuf::FieldDescriptor::TYPE_UINT32:
+            if (result < 0) {
+                spdlog::warn("Field '{}' has negative value {} for uint32, skipping",
+                             field_name, result);
+                return;
+            }
             reflection->SetUInt32(&event, fd,
                                   static_cast<uint32_t>(result));
             break;
@@ -196,6 +201,11 @@ void FieldApplier::setInt64Field(HttpAccessEvent& event,
             reflection->SetInt64(&event, fd, result);
             break;
         case google::protobuf::FieldDescriptor::TYPE_UINT64:
+            if (result < 0) {
+                spdlog::warn("Field '{}' has negative value {} for uint64, skipping",
+                             field_name, result);
+                return;
+            }
             reflection->SetUInt64(&event, fd,
                                   static_cast<uint64_t>(result));
             break;
@@ -541,6 +551,12 @@ std::string FieldApplier::base64Decode(std::string_view encoded) {
             result.push_back(static_cast<char>((val >> valb) & 0xFF));
             valb -= 8;
         }
+    }
+
+    // 冲洗循环结束后残留的未完整字节
+    // (base64每4字符编码3字节，当输入不是4的倍数时残留val位)
+    if (valb > -8) {
+        result.push_back(static_cast<char>((val << (-valb)) & 0xFF));
     }
 
     return result;
