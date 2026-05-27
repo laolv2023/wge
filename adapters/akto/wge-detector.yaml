@@ -1,0 +1,74 @@
+# wge-detector.yaml — Akto API 日志适配的检测器配置
+# 与通用配置的区别:
+#   1. 输入 Topic 指向 akto.api.logs
+#   2. 输出 Topic 指向 wge.alert (需求指定)
+#   3. 引用 akto 专用的 log_mapping.yaml
+#   4. worker_threads 优化 (API 日志量通常较大)
+
+# ===== Kafka 配置 =====
+kafka:
+  consumer:
+    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"
+    group_id: "wge-detector-akto"
+    topic: "akto.api.logs"                        # 输入: Akto API 日志 Topic
+    dlq_topic: "akto.api.logs-dlq"                # 死信队列
+    partition_assignment_strategy: "cooperative-sticky"
+    auto_offset_reset: "latest"
+    enable_auto_commit: false
+    session_timeout_ms: 30000
+    max_poll_records: 200                         # API 日志可能较大, 降低单次 poll 数量
+    max_poll_interval_ms: 300000
+    fetch_max_bytes: 2097152                      # 2MB per fetch (API 日志 body 可能较大)
+    security_protocol: "${KAFKA_SECURITY_PROTOCOL:-SASL_PLAINTEXT}"
+    sasl_mechanism: "${KAFKA_SASL_MECHANISM:-SCRAM-SHA-512}"
+    sasl_username: "${KAFKA_SASL_USERNAME}"
+    sasl_password: "${KAFKA_SASL_PASSWORD}"
+
+  producer:
+    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"
+    topic: "wge.alert"                            # 输出: WGE 告警 Topic
+    acks: "all"
+    enable_idempotence: true
+    compression_type: "lz4"
+    batch_size: 65536
+    linger_ms: 20
+    retries: 3
+    max_in_flight_requests_per_connection: 5
+    transactional_id: "wge-alert-akto-${INSTANCE_ID:-0}"
+    security_protocol: "${KAFKA_SECURITY_PROTOCOL:-SASL_PLAINTEXT}"
+    sasl_mechanism: "${KAFKA_SASL_MECHANISM:-SCRAM-SHA-512}"
+    sasl_username: "${KAFKA_SASL_USERNAME}"
+    sasl_password: "${KAFKA_SASL_PASSWORD}"
+
+# ===== WGE 引擎配置 =====
+wge:
+  rule_files:
+    - "/etc/wge/rules/crs-setup.conf"
+    - "/etc/wge/rules/crs/rules/*.conf"
+  log_level: "warn"
+  log_file: "/var/log/wge/engine.log"
+
+# ===== 日志映射配置 (指向 Akto 专用适配器) =====
+mapping:
+  config_file: "/etc/wge/adapters/akto/log_mapping.yaml"
+  preprocessor: "akto"                            # 指定 Akto 预处理器 (处理 JSON 字符串 headers)
+
+# ===== 检测调度配置 =====
+detector:
+  poll_interval_ms: 100
+  worker_threads: 8
+  batch_size: 50                                 # 降低批次大小 (API 日志处理较慢)
+  alert_batch_size: 50
+  alert_linger_ms: 50
+  max_pending_tasks: 2000
+  task_timeout_ms: 5000
+  slow_consumer_threshold_ms: 5000
+  health_check_port: 9100
+  readiness_threshold_lag: 10000
+
+# ===== 可观测性 =====
+observability:
+  prometheus:
+    enabled: true
+    port: 9101
+    path: "/metrics"
