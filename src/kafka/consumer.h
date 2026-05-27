@@ -12,7 +12,6 @@
  */
 
 #include <atomic>
-#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -238,12 +237,6 @@ private:
 
     /// @brief 线程运行标志，防止重复启动
     std::atomic<bool> running_{false};
-
-    /// @brief 条件变量，用于优雅停止时唤醒 poll 线程
-    mutable std::condition_variable stop_cv_;
-
-    /// @brief 配合 stop_cv_ 的 mutex
-    mutable std::mutex stop_mutex_;
 
     /// @brief 保护 lag/offset 查询的 mutex
     mutable std::mutex query_mutex_;
