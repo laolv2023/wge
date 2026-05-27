@@ -1,6 +1,22 @@
 /**
  * @file regex_mapper.cc
- * @brief RegexMapper 实现
+ * @brief RegexMapper 实现 — 正则表达式与 Grok 模式匹配器
+ *
+ * ## 模块职责
+ * RegexMapper 负责：
+ * 1. **正则匹配**: 使用 RE2（Google 的线性时间正则引擎）从原始日志中提取字段
+ * 2. **Grok 支持**: 将 Grok 模式语法 (%{PATTERN:name}) 转换为 RE2 正则表达式
+ * 3. **编译缓存**: 静态 cache_mutex_ 保护的 compile_cache_ 实现跨实例的模式共享
+ *
+ * ## 关键设计
+ * - **RE2 引擎**: 选择 RE2 而非 std::regex 的原因：
+ *   - O(n) 线性时间复杂度，无回溯导致 ReDoS 风险
+ *   - 线程安全，可在多线程中并发匹配
+ * - **编译缓存**: 使用 double-check locking 模式：
+ *   1. 读锁查找缓存
+ *   2. 未命中时编译（无锁）
+ *   3. 写锁 double-check + 写入
+ * - **Grok 转换**: 手动解析 %{PATTERN:capture_name} 语法并展开嵌套模式
  */
 
 #include "mapper/regex_mapper.h"
@@ -119,16 +135,17 @@ std::expected<void, std::string> RegexMapper::compile(
 
 std::expected<std::shared_ptr<re2::RE2>, std::string>
 RegexMapper::getOrCompile(const std::string& pattern) const {
-    // 先尝试读缓存（读锁）
+    // 第 1 步: 尝试读缓存（持锁）
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         auto it = compile_cache_.find(pattern);
         if (it != compile_cache_.end()) {
-            return it->second;
+            return it->second;  // 缓存命中，直接返回
         }
     }
+    // 锁外编译: RE2 编译是 CPU 密集型操作，不在持锁状态下执行
 
-    // 编译
+    // 第 2 步: 编译正则（可能耗时）
     auto re = std::make_shared<re2::RE2>(pattern);
     if (!re->ok()) {
         return std::unexpected(
@@ -136,15 +153,15 @@ RegexMapper::getOrCompile(const std::string& pattern) const {
             " (pattern: " + pattern + ")");
     }
 
-    // 写入缓存
+    // 第 3 步: 写缓存（Double-check）
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         // Double-check: 可能已有其他线程写入
         auto it = compile_cache_.find(pattern);
         if (it != compile_cache_.end()) {
-            return it->second;
+            return it->second;  // 其他线程已写入，返回其编译结果
         }
-        compile_cache_[pattern] = re;
+        compile_cache_[pattern] = re;  // 首次写入
     }
 
     return re;
@@ -284,23 +301,26 @@ RegexMapper::fullMatchAndExtract(
 std::expected<std::string, std::string> RegexMapper::grokToRegex(
     const std::string& grok_pattern,
     const std::map<std::string, std::string>& custom_patterns) {
-    // 合并内置和自定义模式
+    // 合并内置模式和用户自定义模式，自定义模式优先级更高
     std::map<std::string, std::string> all_patterns = builtinGrokPatterns();
     for (const auto& [name, regex] : custom_patterns) {
-        all_patterns[name] = regex;
+        all_patterns[name] = regex;  // 覆盖内置同名模式
     }
 
     std::string result = grok_pattern;
 
     // Grok 语法: %{PATTERN_NAME:capture_name} 或 %{PATTERN_NAME}
-    // 使用简单的手动解析避免引入复杂依赖
+    // 转换规则:
+    //   %{IP:client_ip}   → (?P<client_ip>(?:...IP regex...))
+    //   %{IP}             → (?:(?:...IP regex...))  (无捕获组)
+    //
+    // 使用迭代替换而非递归，支持嵌套 Grok 模式（如 %{IPORHOST} 包含 %{IP}）
 
-    // 查找 %{ 的位置
     size_t pos = 0;
-    int max_iterations = 200;  // 防止无限循环
+    int max_iterations = 200;  // 防止无限循环（畸形输入保护）
     while (max_iterations-- > 0) {
         size_t start = result.find("%{", pos);
-        if (start == std::string::npos) break;
+        if (start == std::string::npos) break;  // 没有更多 Grok 模式
 
         size_t end = result.find('}', start);
         if (end == std::string::npos) {
@@ -316,12 +336,13 @@ std::expected<std::string, std::string> RegexMapper::grokToRegex(
         std::string capture_name;
 
         // 查找冒号分隔的模式名和捕获名
+        // 例如: %{IP:client_ip} → pattern_name="IP", capture_name="client_ip"
         size_t colon = inner.find(':');
         if (colon != std::string::npos) {
             pattern_name = inner.substr(0, colon);
             capture_name = inner.substr(colon + 1);
         } else {
-            pattern_name = inner;
+            pattern_name = inner;  // %{IP} → 仅模式名，无捕获名
         }
 
         // 去除首尾空格
@@ -347,17 +368,17 @@ std::expected<std::string, std::string> RegexMapper::grokToRegex(
         // 构建替换文本
         std::string replacement;
         if (!capture_name.empty()) {
-            // 有捕获名: 生成命名捕获组
+            // 有捕获名: 生成 RE2 命名捕获组 (?P<name>regex)
             replacement = "(?P<" + capture_name + ">" + pit->second + ")";
         } else {
-            // 无捕获名: 只展开模式
+            // 无捕获名: 生成非捕获组 (?:regex)
             replacement = "(?:" + pit->second + ")";
         }
 
-        // 替换
+        // 替换 %{...} 为对应的正则
         result.replace(start, end - start + 1, replacement);
 
-        // 从替换位置继续（可能包含嵌套 Grok 模式）
+        // 从替换位置继续扫描（可能包含嵌套 Grok 模式，如 %{IPORHOST} 包含 %{IP}）
         pos = start;
     }
 
