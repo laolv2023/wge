@@ -1,6 +1,21 @@
 /**
  * @file config_loader.cc
- * @brief ConfigLoader 实现
+ * @brief ConfigLoader 实现 — YAML 配置加载器
+ *
+ * ## 模块职责
+ * ConfigLoader 负责从 YAML 文件加载应用程序配置，包括：
+ * - YAML 解析（yaml-cpp）
+ * - 环境变量替换（${VAR_NAME} 和 ${VAR_NAME:-default} 语法）
+ * - 配置验证（必填字段检查、值范围验证）
+ * - 配置热重载（reload: 从 base config 合并新配置）
+ *
+ * ## 配置段
+ * - **kafka.consumer**: 消费者配置（bootstrap_servers, group_id, topic 等）
+ * - **kafka.producer**: 生产者配置（bootstrap_servers, topic, dlq_topic 等）
+ * - **wge**: WGE 引擎配置（rule_files, engine_config_path 等）
+ * - **mapping**: 日志映射配置（log_mapping_path）
+ * - **detector**: 检测器配置（worker_threads, batch_size, timeout 等）
+ * - **observability**: 可观测性配置（日志级别、Prometheus、OTel 等）
  */
 
 #include "config/config_loader.h"
@@ -247,13 +262,18 @@ void parseObservability(ObservabilityConfig& cfg, const YAML::Node& node) {
 // ============================================================================
 
 std::string ConfigLoader::substituteEnvVars(const std::string& value) {
-    // 匹配 ${VAR_NAME} 或 ${VAR_NAME:-default}
-    thread_local const std::regex env_pattern(R"(\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})");
+    // 匹配两种模式:
+    //   ${VAR_NAME}          → 环境变量 VAR_NAME 的值
+    //   ${VAR_NAME:-default} → 环境变量值，若未设置则使用 default
+    //
+    // 使用 thread_local regex 避免每次调用重新编译
+    thread_local const std::regex env_pattern(
+        R"(\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})");
 
     std::string result = value;
     std::smatch match;
 
-    // 循环替换，最多 32 层（防止无限递归）
+    // 循环替换，最多 32 层（防止无限递归，如 A→${B}→${A}）
     for (int iteration = 0; iteration < 32; ++iteration) {
         std::string working = result;
         if (!std::regex_search(working, match, env_pattern)) break;
@@ -261,29 +281,31 @@ std::string ConfigLoader::substituteEnvVars(const std::string& value) {
         std::string replaced;
         size_t last_pos = 0;
 
+        // 使用 sregex_iterator 遍历所有匹配，支持一个字符串中有多个变量
         auto it = std::sregex_iterator(working.begin(), working.end(),
                                        env_pattern);
         auto end = std::sregex_iterator();
 
         for (; it != end; ++it) {
             match = *it;
-            // 追加匹配前的文本
+            // 追加匹配前的文本（不包含变量的普通文本）
             replaced.append(working, last_pos,
                             static_cast<size_t>(match.position()) - last_pos);
 
-            std::string var_name = match[1].str();
-            std::string default_val = match[2].matched ? match[2].str() : "";
+            std::string var_name = match[1].str();       // 变量名（捕获组 1）
+            std::string default_val = match[2].matched ? match[2].str() : "";  // 默认值（捕获组 2）
 
+            // getenv 查询环境变量
             const char* env_val = std::getenv(var_name.c_str());
             if (env_val != nullptr) {
-                replaced.append(env_val);
+                replaced.append(env_val);     // 环境变量存在 → 使用其值
             } else {
-                replaced.append(default_val);
+                replaced.append(default_val); // 环境变量不存在 → 使用默认值
             }
 
             last_pos = static_cast<size_t>(match.position() + match.length());
         }
-        // 追加剩余文本
+        // 追加最后一段文本（最后一个变量之后的普通文本）
         replaced.append(working, last_pos, working.length() - last_pos);
 
         result = std::move(replaced);
@@ -298,6 +320,8 @@ std::string ConfigLoader::substituteEnvVars(const std::string& value) {
 
 std::expected<void, std::string> ConfigLoader::validate(
     const AppConfig& config) {
+    // ===== 必填字段验证 =====
+
     // 验证 Kafka consumer topic
     if (config.kafka.consumer.topic.empty()) {
         return std::unexpected(
@@ -310,7 +334,7 @@ std::expected<void, std::string> ConfigLoader::validate(
             "Missing required field: kafka.producer.topic");
     }
 
-    // 验证 WGE rule_files
+    // 验证 WGE rule_files（至少需要一个规则文件）
     if (config.wge.rule_files.empty()) {
         return std::unexpected(
             "Missing required field: wge.rule_files (at least one rule file "
@@ -323,19 +347,21 @@ std::expected<void, std::string> ConfigLoader::validate(
             "Missing required field: mapping.log_mapping_path");
     }
 
-    // 验证 worker_threads 合理性
+    // ===== 取值范围验证 =====
+
+    // worker_threads: >= 0（0 表示自动检测）
     if (config.detector.worker_threads < 0) {
         return std::unexpected(
             "Invalid value for detector.worker_threads: must be >= 0");
     }
 
-    // 验证 batch_size 合理性
+    // batch_size: 1 ~ 10000
     if (config.detector.batch_size < 1 || config.detector.batch_size > 10'000) {
         return std::unexpected(
             "Invalid value for detector.batch_size: must be in [1, 10000]");
     }
 
-    // 验证 task_timeout_ms 合理性
+    // task_timeout_ms: 100ms ~ 5min
     if (config.detector.task_timeout_ms < 100 ||
         config.detector.task_timeout_ms > 300'000) {
         return std::unexpected(
@@ -343,19 +369,19 @@ std::expected<void, std::string> ConfigLoader::validate(
             "300000]");
     }
 
-    // 验证 consumer bootstrap_servers
+    // consumer bootstrap_servers
     if (config.kafka.consumer.bootstrap_servers.empty()) {
         return std::unexpected(
             "Missing required field: kafka.consumer.bootstrap_servers");
     }
 
-    // 验证 producer bootstrap_servers
+    // producer bootstrap_servers
     if (config.kafka.producer.bootstrap_servers.empty()) {
         return std::unexpected(
             "Missing required field: kafka.producer.bootstrap_servers");
     }
 
-    return {};
+    return {};  // 验证通过
 }
 
 // ============================================================================
@@ -433,7 +459,8 @@ std::expected<AppConfig, std::string> ConfigLoader::loadFromFile(
 
 std::expected<AppConfig, std::string> ConfigLoader::reload(
     const AppConfig& base, const std::string& path) {
-    // 从 base 开始，使得新配置中未指定的字段回退到 base 的值
+    // 从 base 配置开始，使新文件中未指定的字段回退到 base 的值
+    // 这是 "merge" 而非 "replace" 语义
     AppConfig merged = base;
 
     // 加载新文件
@@ -454,6 +481,7 @@ std::expected<AppConfig, std::string> ConfigLoader::reload(
         return std::unexpected("Empty YAML document during reload: " + path);
     }
 
+    // 只覆盖新文件中存在的段（部分覆盖语义）
     try {
         if (root["kafka"] && root["kafka"]["consumer"]) {
             parseConsumer(merged.kafka.consumer, root["kafka"]["consumer"]);
@@ -486,7 +514,7 @@ std::expected<AppConfig, std::string> ConfigLoader::reload(
             std::string("Unexpected error during reload: ") + e.what());
     }
 
-    // 验证合并后的配置
+    // 验证合并后的配置（确保重载后配置仍然有效）
     auto validation_result = validate(merged);
     if (!validation_result) {
         return std::unexpected(validation_result.error());
