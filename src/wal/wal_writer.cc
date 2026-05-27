@@ -9,7 +9,9 @@
 #include <cstring>
 #include <ctime>
 #include <stdexcept>
+#include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "spdlog/spdlog.h"
 #include "wge_alert.pb.h"
@@ -114,6 +116,10 @@ void WalWriter::write(const std::shared_ptr<WgeAlertEvent>& alert) {
             std::string(std::strerror(errno)));
     }
 
+    // 强制刷盘，确保崩溃时数据不丢失
+    std::fflush(current_file_);
+    ::fsync(::fileno(current_file_));
+
     SPDLOG_DEBUG("WalWriter: wrote alert_id={} to {} ({} bytes)",
                  alert->alert_id(), current_file_path_, json_line.size());
 }
@@ -190,6 +196,49 @@ void WalWriter::rotateIfNeeded(const std::tm& now) {
 }
 
 // ============================================================================
+// 简易 base64 编码 (用于 protobuf 二进制序列化的文本化)
+// ============================================================================
+
+namespace {
+
+const char kBase64Table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string base64Encode(const std::string& input) {
+    std::string output;
+    output.reserve(((input.size() + 2) / 3) * 4);
+
+    size_t i = 0;
+    unsigned char buf3[3];
+    for (auto it = input.begin(); it != input.end(); ) {
+        int len = 0;
+        for (; len < 3 && it != input.end(); ++len, ++it) {
+            buf3[len] = static_cast<unsigned char>(*it);
+        }
+        if (len == 0) break;
+
+        output += kBase64Table[buf3[0] >> 2];
+        if (len == 1) {
+            output += kBase64Table[(buf3[0] & 0x03) << 4];
+            output += '=';
+            output += '=';
+        } else {
+            output += kBase64Table[((buf3[0] & 0x03) << 4) | (buf3[1] >> 4)];
+            if (len == 2) {
+                output += kBase64Table[(buf3[1] & 0x0f) << 2];
+                output += '=';
+            } else {
+                output += kBase64Table[((buf3[1] & 0x0f) << 2) | (buf3[2] >> 6)];
+                output += kBase64Table[buf3[2] & 0x3f];
+            }
+        }
+    }
+    return output;
+}
+
+}  // namespace
+
+// ============================================================================
 // serializeToJsonLine
 // ============================================================================
 
@@ -205,19 +254,11 @@ std::string WalWriter::serializeToJsonLine(const WgeAlertEvent& alert) {
     if (status.ok()) {
         return json;
     }
-    // 回退到 Utf8DebugString
 #endif
-    std::string text = alert.Utf8DebugString();
-    std::string compressed;
-    compressed.reserve(text.size());
-    for (char c : text) {
-        if (c == '\n' || c == '\r') {
-            compressed += ' ';
-        } else {
-            compressed += c;
-        }
-    }
-    return compressed;
+    // 无 JSON util 时使用二进制序列化 + base64，确保与 Relay 端兼容
+    std::string binary;
+    alert.SerializeToString(&binary);
+    return base64Encode(binary);
 }
 
 }  // namespace wge::kafka::wal
