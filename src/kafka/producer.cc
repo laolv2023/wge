@@ -1,6 +1,28 @@
 /**
  * @file producer.cc
- * @brief AlertProducer 实现
+ * @brief AlertProducer 实现 — Kafka 告警生产者
+ *
+ * ## 模块职责
+ * AlertProducer 负责将 WGE 检测生成的告警（WgeAlertEvent）发送到 Kafka。
+ *
+ * ## 核心设计
+ * - **异步批处理**: 使用独立的 flush 线程从内存队列（std::deque）中批量取出告警，
+ *   通过 librdkafka 的 produce() API 发送
+ * - **事务支持 (Exactly-Once Semantics)**:
+ *   - 若配置了 transactional.id，则启用 Kafka 事务
+ *   - 每批次告警在 begin_transaction → produce → send_offsets_to_transaction (CTP) →
+ *     commit_transaction 的事务边界内发送
+ *   - 若 produce 中有任何错误则 abort_transaction，确保原子性
+ * - **CTP (Consume-Transform-Produce) 模式**:
+ *   send_offsets_to_transaction 将 consumer offset 纳入同一事务，
+ *   保证 "消费 → 检测 → 发送告警 → 提交 offset" 的端到端 exactly-once
+ * - **幂等性**: enable_idempotence=true 时设置 acks=all + max.in.flight=5，
+ *   确保即使在非事务模式下也不会产生重复消息
+ *
+ * ## 线程模型
+ * - 生产者线程（worker pool）: 调用 sendAlert() 将告警入队
+ * - Flush 线程: 运行 flushLoopImpl()，从队列取批量消息并 produce
+ * - 队列由 queue_mutex_ + queue_cv_ 保护
  */
 
 #include "kafka/producer.h"
@@ -22,7 +44,11 @@ namespace wge::kafka {
 namespace {
 
 /**
- * @brief 设置 RdKafka Conf 字符串属性
+ * @brief 设置 RdKafka Conf 字符串属性，失败时抛出异常
+ * @param conf RdKafka 配置对象（非空）
+ * @param key  配置项名称
+ * @param value 配置项值
+ * @throws std::runtime_error 若设置失败
  */
 void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
                     const std::string& value) {
@@ -36,7 +62,8 @@ void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
 }
 
 /**
- * @brief 条件设置字符串属性（非空才设置）
+ * @brief 条件设置字符串属性（仅非空时才设置）
+ * @note 用于 SASL 等可选配置，避免设置空值导致 rdkafka 报错
  */
 void setConfIfNotEmpty(RdKafka::Conf* conf, const std::string& key,
                        const std::string& value) {
@@ -46,7 +73,9 @@ void setConfIfNotEmpty(RdKafka::Conf* conf, const std::string& key,
 }
 
 /**
- * @brief 检查 RdKafka ErrorCode，非 NO_ERROR 则抛异常
+ * @brief 检查 RdKafka ErrorCode，非 NO_ERROR 则抛出异常
+ * @param err     RdKafka 错误码
+ * @param context 错误上下文描述（用于异常消息）
  */
 void checkError(RdKafka::ErrorCode err, const std::string& context) {
     if (err != RdKafka::ERR_NO_ERROR) {
@@ -62,7 +91,7 @@ void checkError(RdKafka::ErrorCode err, const std::string& context) {
 
 AlertProducer::AlertProducer(const ProducerConfig& config)
     : config_(config)
-    , conf_(RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL)) {
+    , conf_(RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL)) {  // 创建全局配置对象
 
     if (!conf_) {
         throw std::runtime_error("Failed to create RdKafka::Conf");
@@ -72,32 +101,36 @@ AlertProducer::AlertProducer(const ProducerConfig& config)
     setConfOrThrow(conf_.get(), "bootstrap.servers",
                    config_.bootstrap_servers);
     setConfOrThrow(conf_.get(), "compression.type", config_.compression_type);
+    // message.max.bytes: 10 MB，防止超大告警导致 produce 失败
     setConfOrThrow(conf_.get(), "message.max.bytes",
                    std::to_string(10 * 1024 * 1024));  // 10 MB
     setConfOrThrow(conf_.get(), "retries",
                    std::to_string(config_.retries));
+    // linger.ms: 批量发送的延迟时间，提高吞吐量
     setConfOrThrow(conf_.get(), "linger.ms",
                    std::to_string(config_.linger_ms));
 
-    // ---- 幂等性 ----
+    // ---- 幂等性配置 ----
+    // enable.idempotence=true 确保即使在重试场景下也不会产生重复消息
     if (config_.enable_idempotence) {
         setConfOrThrow(conf_.get(), "enable.idempotence", "true");
-        // 幂等要求 acks=all
+        // 幂等生产者要求 acks=all（等待所有 ISR 确认）
         setConfOrThrow(conf_.get(), "acks", "all");
-        // 幂等要求 max.in.flight <= 5
+        // 幂等生产者要求 max.in.flight <= 5（保证消息顺序）
         setConfOrThrow(conf_.get(), "max.in.flight.requests.per.connection", "5");
     }
 
     // ---- 事务 ID ----
+    // transactional.id 非空时启用 Kafka 事务（Exactly-Once Semantics）
     if (!config_.transactional_id.empty()) {
         setConfOrThrow(conf_.get(), "transactional.id",
                        config_.transactional_id);
     }
 
-    // ---- SASL ----
+    // ---- SASL 认证 ----
     applySaslConfig(conf_.get());
 
-    // ---- 创建 Producer ----
+    // ---- 创建底层 RdKafka::Producer 实例 ----
     std::string err_str;
     producer_ = RdKafka::Producer::create(conf_.get(), err_str);
     if (!producer_) {
@@ -155,9 +188,9 @@ void AlertProducer::sendAlert(std::shared_ptr<WgeAlertEvent> alert) {
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        alert_queue_.push_back(std::move(alert));
+        alert_queue_.push_back(std::move(alert));  // 入队，转移所有权
     }
-    queue_cv_.notify_one();
+    queue_cv_.notify_one();  // 通知 flush 线程有新消息
 }
 
 void AlertProducer::flushLoop(
@@ -220,6 +253,7 @@ size_t AlertProducer::drainQueue(
     std::vector<std::shared_ptr<WgeAlertEvent>>& out) {
     std::lock_guard<std::mutex> lock(queue_mutex_);
 
+    // 最多取 batch_size 条，防止单次 produce 过大
     size_t count = std::min(alert_queue_.size(),
                             static_cast<size_t>(config_.batch_size));
     out.reserve(count);
@@ -247,13 +281,16 @@ void AlertProducer::flushLoopImpl(
 
     SPDLOG_INFO("AlertProducer flush loop started");
 
+    // 主循环：定期从队列中取批量告警发送
     while (!stopped_.load(std::memory_order_acquire)) {
         std::vector<std::shared_ptr<WgeAlertEvent>> batch;
         size_t batch_size = 0;
 
-        // 等待消息到达或超时
+        // ===== 等待消息到达或超时 (linger_ms) =====
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
+            // wait_for: 最多等待 linger_ms 毫秒
+            // predicate: 队列非空 或 已请求停止
             queue_cv_.wait_for(lock,
                 std::chrono::milliseconds(config_.linger_ms),
                 [this] {
@@ -261,13 +298,13 @@ void AlertProducer::flushLoopImpl(
                            stopped_.load(std::memory_order_acquire);
                 });
 
-            // 检查是否应该停止且队列为空
+            // 停止 + 空队列 = 退出循环
             if (stopped_.load(std::memory_order_acquire) &&
                 alert_queue_.empty()) {
                 break;
             }
 
-            // 从队列取出消息
+            // 从队列取出批量消息（最多 batch_size 条）
             size_t count = std::min(alert_queue_.size(),
                                     static_cast<size_t>(config_.batch_size));
             batch.reserve(count);
@@ -277,33 +314,35 @@ void AlertProducer::flushLoopImpl(
             }
             batch_size = count;
         }
+        // 锁外：不持锁进行 Kafka I/O
 
         if (batch.empty()) {
-            // 超时无消息，可能需 flush 待发送缓冲区
+            // 超时无消息，非阻塞 flush 确保待发送缓冲区被推送到 broker
             if (producer_) {
-                producer_->flush(0);  // 非阻塞 flush
+                producer_->flush(0);  // timeout=0: 非阻塞
             }
             continue;
         }
 
-        // ---- 事务性发送 ----
+        // ===== 事务性发送 =====
+        // 若配置了 transactional_id，则整个批次的 produce 在一个事务内
         bool has_transaction =
             !config_.transactional_id.empty() && producer_;
 
         try {
             if (has_transaction) {
+                // 1. 开始事务
                 RdKafka::ErrorCode begin_err =
                     producer_->begin_transaction();
                 if (begin_err != RdKafka::ERR_NO_ERROR) {
                     SPDLOG_ERROR("begin_transaction failed: {}",
                                  RdKafka::err2str(begin_err));
-                    // 重启事务或跳过此批次
-                    producer_->abort_transaction(30'000);
-                    continue;
+                    producer_->abort_transaction(30'000);  // 清理事务状态
+                    continue;  // 跳过此批次，下次重试
                 }
             }
 
-            // Produce 所有消息
+            // 2. Produce 批次中的所有告警
             int32_t produce_errors = 0;
             for (auto& alert : batch) {
                 if (!alert) continue;
@@ -314,22 +353,23 @@ void AlertProducer::flushLoopImpl(
                 } catch (const std::exception& e) {
                     SPDLOG_ERROR("Alert serialization failed: {}", e.what());
                     produce_errors++;
-                    continue;
+                    continue;  // 序列化失败跳过此条，继续处理下一条
                 }
 
-                // 使用 alert_id 作为 key 以保证同一告警的有序性
+                // 使用 alert_id 作为消息 key，保证同一告警有序且支持 compaction
                 const std::string& key = alert->alert_id();
 
+                // produce() 是异步的，消息先进入 librdkafka 内部缓冲区
                 RdKafka::ErrorCode produce_err = producer_->produce(
                     config_.topic,                          // topic
-                    RdKafka::Topic::PARTITION_UA,          // 任意分区
-                    RdKafka::Producer::RK_MSG_COPY,        // 拷贝 payload
-                    const_cast<char*>(payload.data()),      // payload
-                    payload.size(),                         // payload size
-                    key.data(),                             // key
-                    key.size(),                             // key size
-                    0,                                      // timestamp (now)
-                    nullptr                                 // opaque
+                    RdKafka::Topic::PARTITION_UA,          // 任意分区（由 key hash 决定）
+                    RdKafka::Producer::RK_MSG_COPY,        // 拷贝 payload（不要求外部保持缓冲区）
+                    const_cast<char*>(payload.data()),      // payload 数据
+                    payload.size(),                         // payload 大小
+                    key.data(),                             // key 数据
+                    key.size(),                             // key 大小
+                    0,                                      // timestamp: 0=由 broker 设置
+                    nullptr                                 // opaque: 无需回调
                 );
 
                 if (produce_err != RdKafka::ERR_NO_ERROR) {
@@ -340,9 +380,9 @@ void AlertProducer::flushLoopImpl(
                 }
             }
 
-            // 提交事务 (含 offset)
+            // 3. 提交事务（含 consumer offset — CTP 模式）
             if (has_transaction) {
-                // 先检查 produce 是否有错误，有则 abort
+                // produce 有错误时 abort 事务，确保原子性
                 if (produce_errors > 0) {
                     SPDLOG_ERROR("AlertProducer: {} produce errors, aborting transaction",
                                  produce_errors);
@@ -350,11 +390,13 @@ void AlertProducer::flushLoopImpl(
                     continue;
                 }
 
-                // 每次事务前从 consumer 重新获取 group_metadata（rebalance 后不失效）
+                // CTP: 每次事务前重新获取 group_metadata
+                // （rebalance 后 metadata 可能失效，需要重新获取）
                 RdKafka::ConsumerGroupMetadata* group_metadata =
                     group_metadata_provider ? group_metadata_provider() : nullptr;
                 if (group_metadata) {
-                    // CTP: 将 consumer offset 也纳入事务
+                    // send_offsets_to_transaction: 将 consumer offset 纳入事务
+                    // 保证 "消费 → 检测 → 告警 → 提交 offset" 原子性
                     RdKafka::ErrorCode offset_err =
                         producer_->send_offsets_to_transaction(
                             group_metadata, 30'000);
@@ -367,6 +409,7 @@ void AlertProducer::flushLoopImpl(
                     }
                 }
 
+                // 提交事务（两阶段提交的 commit 阶段）
                 RdKafka::ErrorCode commit_err =
                     producer_->commit_transaction(30'000);
                 if (commit_err != RdKafka::ERR_NO_ERROR) {
@@ -383,13 +426,13 @@ void AlertProducer::flushLoopImpl(
         } catch (const std::exception& e) {
             SPDLOG_ERROR("AlertProducer flush loop exception: {}", e.what());
             if (has_transaction) {
-                producer_->abort_transaction(30'000);
+                producer_->abort_transaction(30'000);  // 异常时确保事务被清理
             }
         }
     }
 
-    // ---- 处理停止信号到达后剩余的队列消息 ----
-    // 先 swap 到局部变量，释放锁后再逐条 produce，避免持锁调用阻塞操作
+    // ===== 处理停止后剩余的队列消息 =====
+    // swap 到局部变量释放锁，避免持锁调用阻塞的 produce
     std::deque<std::shared_ptr<WgeAlertEvent>> remaining;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
