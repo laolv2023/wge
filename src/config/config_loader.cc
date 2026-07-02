@@ -402,6 +402,46 @@ std::expected<void, std::string> ConfigLoader::validate(
             "Missing required field: kafka.producer.bootstrap_servers");
     }
 
+    // ===== SASL 配置一致性验证 =====
+    // 如果 security_protocol 包含 sasl，则 sasl_mechanism/username/password 必填
+    auto validate_sasl = [](const std::string& proto,
+                            const std::string& mechanism,
+                            const std::string& username,
+                            const std::string& password,
+                            const std::string& component) -> std::expected<void, std::string> {
+        if (proto == "sasl_plaintext" || proto == "sasl_ssl") {
+            if (mechanism.empty()) {
+                return std::unexpected(
+                    component + ".sasl_mechanism is required when security_protocol is " + proto);
+            }
+            if (username.empty()) {
+                return std::unexpected(
+                    component + ".sasl_username is required when security_protocol is " + proto);
+            }
+            if (password.empty()) {
+                return std::unexpected(
+                    component + ".sasl_password is required when security_protocol is " + proto);
+            }
+        }
+        return {};
+    };
+
+    if (auto r = validate_sasl(config.kafka.consumer.security_protocol,
+                               config.kafka.consumer.sasl_mechanism,
+                               config.kafka.consumer.sasl_username,
+                               config.kafka.consumer.sasl_password,
+                               "kafka.consumer"); !r) {
+        return std::unexpected(r.error());
+    }
+
+    if (auto r = validate_sasl(config.kafka.producer.security_protocol,
+                               config.kafka.producer.sasl_mechanism,
+                               config.kafka.producer.sasl_username,
+                               config.kafka.producer.sasl_password,
+                               "kafka.producer"); !r) {
+        return std::unexpected(r.error());
+    }
+
     return {};  // 验证通过
 }
 

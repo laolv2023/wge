@@ -113,8 +113,12 @@ KafkaConsumer::KafkaConsumer(const ConsumerConfig& config)
                    config_.enable_auto_commit ? "true" : "false");
     // max.poll.interval.ms: 设置为 session_timeout * 3，
     // 给下游处理留足时间，防止因处理慢被踢出 group
+    // 溢出保护: session_timeout_ms * 3 可能溢出 int32_t
+    int64_t max_poll_interval = static_cast<int64_t>(config_.session_timeout_ms) * 3;
+    if (max_poll_interval > INT32_MAX) max_poll_interval = INT32_MAX;
+    if (max_poll_interval < 1) max_poll_interval = 1;
     setConfOrThrow(global_conf_.get(), "max.poll.interval.ms",
-                   std::to_string(config_.session_timeout_ms * 3));
+                   std::to_string(max_poll_interval));
 
     // 安全协议（SASL/SSL）
     applySaslConfig(global_conf_.get());
