@@ -1,7 +1,7 @@
 # wge-detector.yaml — Akto API 日志适配的检测器配置
 # 与通用配置的区别:
-#   1. 输入 Topic 指向 akto.api.logs
-#   2. 输出 Topic 指向 wge.alert (需求指定)
+#   1. 输入 Topic 指向 akto.api.logs2 (Protobuf HttpResponseParam 格式)
+#   2. 输出 Topic 指向 akto.threat_detection.malicious_events (Akto 告警总线)
 #   3. 引用 akto 专用的 log_mapping.yaml
 #   4. worker_threads 优化 (API 日志量通常较大)
 
@@ -10,8 +10,8 @@ kafka:
   consumer:
     bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"
     group_id: "wge-detector-akto"
-    topic: "akto.api.logs"                        # 输入: Akto API 日志 Topic
-    dlq_topic: "akto.api.logs-dlq"                # 死信队列
+    topic: "akto.api.logs2"                     # 输入: Akto API 日志 Topic (Protobuf 格式)
+    dlq_topic: "akto.api.logs2-dlq"             # 死信队列
     partition_assignment_strategy: "cooperative-sticky"
     auto_offset_reset: "latest"
     enable_auto_commit: false
@@ -26,7 +26,7 @@ kafka:
 
   producer:
     bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"
-    topic: "wge.alert"                            # 输出: WGE 告警 Topic
+    topic: "akto.threat_detection.malicious_events"  # 输出: Akto 告警总线 Topic
     acks: "all"
     enable_idempotence: true
     compression_type: "lz4"
