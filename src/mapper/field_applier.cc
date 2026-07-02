@@ -496,7 +496,10 @@ int64_t FieldApplier::parseTimestamp(
                 errno = 0;
                 auto epoch = timegm(&tm);
                 if (errno == 0) {
-                    int64_t result = static_cast<int64_t>(epoch) * 1000;
+                    // 溢出保护
+                    int64_t ep = static_cast<int64_t>(epoch);
+                    if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
+                    int64_t result = ep * 1000;
                     int tz_offset = tz_h * 3600 + tz_m * 60;
                     if (tz_sign_c == '-') tz_offset = -tz_offset;
                     result -= static_cast<int64_t>(tz_offset) * 1000;
