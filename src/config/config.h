@@ -132,6 +132,9 @@ struct ProducerConfig {
     /// @brief SASL 密码
     std::string sasl_password{};
 
+    /// @brief 内部队列最大容量（防止 broker 宕机时 OOM）
+    size_t max_queue_size{100000};
+
     /// @brief 额外配置属性
     std::vector<std::pair<std::string, std::string>> extra_properties{};
 };

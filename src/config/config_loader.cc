@@ -205,6 +205,11 @@ void parseProducer(ProducerConfig& cfg, const YAML::Node& node) {
                  getOptionalString(node, "sasl_username"));
     setIfPresent(cfg.sasl_password,
                  getOptionalString(node, "sasl_password"));
+    // max_queue_size: size_t 类型，从 int64 解析
+    auto mqs = getOptionalInt64(node, "max_queue_size");
+    if (mqs.has_value() && mqs.value() > 0) {
+        cfg.max_queue_size = static_cast<size_t>(mqs.value());
+    }
 }
 
 /**

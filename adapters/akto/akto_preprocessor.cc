@@ -192,13 +192,39 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
         case ondemand::json_type::null:
             out << "null";
             break;
-        case ondemand::json_type::object:
+        case ondemand::json_type::object: {
             // 嵌入式 JSON 对象: 直接序列化
-            out << simdjson::to_json_string(field.value().get_value());
+            auto val_result = field.value().get_value();
+            if (val_result.error()) {
+                out << "null";
+            } else {
+                auto json_result = simdjson::to_json_string(val_result.value());
+                if (json_result.error()) {
+                    out << "null";
+                } else {
+                    out << json_result.value();
+                }
+            }
             break;
-        case ondemand::json_type::array:
-            // 数组: 直接序列化
-            out << simdjson::to_json_string(field.value().get_value());
+        }
+        case ondemand::json_type::array: {
+            // 嵌入式 JSON 数组: 直接序列化
+            auto val_result = field.value().get_value();
+            if (val_result.error()) {
+                out << "null";
+            } else {
+                auto json_result = simdjson::to_json_string(val_result.value());
+                if (json_result.error()) {
+                    out << "null";
+                } else {
+                    out << json_result.value();
+                }
+            }
+            break;
+        }
+        default:
+            // 未知类型: 输出 null
+            out << "null";
             break;
         }
     }

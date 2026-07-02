@@ -298,6 +298,8 @@ wge::kafka::ProducerConfig bridgeProducerConfig(
     out.bootstrap_servers = cfg.bootstrap_servers;
     out.topic = cfg.topic;
     out.compression_type = cfg.compression_type;
+    out.dlq_topic = cfg.dlq_topic;
+    out.max_queue_size = cfg.max_queue_size;
     out.batch_size = batch_size_override;  // 从 detector 配置覆盖
     out.linger_ms = static_cast<int32_t>(cfg.linger_ms);  // double → int32
     out.retries = cfg.retries;
@@ -415,11 +417,16 @@ int main(int argc, char* argv[]) {
 
     // ---- 9. 初始化 DeadLetterQueue ----
     SPDLOG_INFO("Initializing DeadLetterQueue...");
+    // 使用 producer_cfg 的 SASL 配置，确保 DLQ 也能连接需要认证的 Kafka broker
     DeadLetterQueue dlq(
-        config.kafka.producer.bootstrap_servers,
-        config.kafka.producer.dlq_topic);
+        producer_cfg.bootstrap_servers,
+        producer_cfg.dlq_topic,
+        producer_cfg.security_protocol,
+        producer_cfg.sasl_mechanism,
+        producer_cfg.sasl_username,
+        producer_cfg.sasl_password);
     SPDLOG_INFO("DeadLetterQueue initialized: topic={}",
-                config.kafka.producer.dlq_topic);
+                producer_cfg.dlq_topic);
 
     // ---- 9.5 初始化 AktoAdapter (V6.0: 借船出海注入 Akto 告警总线) ----
     // 设计报告第5章: AktoAdapter 将 WgeAlertEvent 转换为 MaliciousEventKafkaEnvelope JSON,
