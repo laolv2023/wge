@@ -145,8 +145,12 @@ void WgeWorkerPool::stop() {
     }
 
     // drain 超时: task_timeout_ms * 2，防止挂起的 detect() 永久阻塞 shutdown
+    // 溢出保护: task_timeout_ms * 2 可能溢出 int32_t
+    int64_t drain_timeout_ms = static_cast<int64_t>(config_.task_timeout_ms) * 2;
+    if (drain_timeout_ms > INT32_MAX) drain_timeout_ms = INT32_MAX;
+    if (drain_timeout_ms < 1) drain_timeout_ms = 1;
     auto drain_deadline = std::chrono::steady_clock::now()
-        + std::chrono::milliseconds(config_.task_timeout_ms * 2);
+        + std::chrono::milliseconds(drain_timeout_ms);
 
     for (auto& event : remaining) {
         try {

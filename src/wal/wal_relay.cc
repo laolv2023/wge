@@ -274,7 +274,10 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
 
     if (lines.empty()) {
         // 空文件，直接删除
-        std::remove(file_path.c_str());
+        if (std::remove(file_path.c_str()) != 0) {
+            SPDLOG_WARN("WalRelay: failed to remove empty WAL file '{}': {}",
+                        file_path, std::strerror(errno));
+        }
         return 0;
     }
 
@@ -346,7 +349,19 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
                     outfile << lines[i] << '\n';
                 }
             }
+            // 检查写入是否成功（磁盘满等）
+            if (!outfile.good()) {
+                SPDLOG_ERROR("WalRelay: write error while rewriting WAL file '{}'",
+                             tmp_path);
+            }
             outfile.close();
+            // 检查 close 是否成功（flush 失败等）
+            if (outfile.fail()) {
+                SPDLOG_ERROR("WalRelay: close error while rewriting WAL file '{}'",
+                             tmp_path);
+                std::remove(tmp_path.c_str());
+                return relayed;  // 保留原始文件，下次扫描重试
+            }
 
             if (std::rename(tmp_path.c_str(), file_path.c_str()) != 0) {
                 SPDLOG_ERROR("WalRelay: failed to rename tmp file: {}",

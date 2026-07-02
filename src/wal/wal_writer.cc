@@ -140,17 +140,31 @@ void WalWriter::write(const std::shared_ptr<WgeAlertEvent>& alert) {
     }
 
     // 追加换行符（JSON Lines 格式: 每行一个 JSON 对象）
-    std::fputc('\n', current_file_);
+    if (std::fputc('\n', current_file_) == EOF) {
+        SPDLOG_ERROR("WalWriter::write: fputc('\\n') failed (disk full?)");
+        throw std::runtime_error(
+            "WalWriter::write: fputc newline failed: " +
+            std::string(std::strerror(errno)));
+    }
 
     // 强制刷盘: fflush + fsync 确保数据写入物理介质
     // 这是 WAL 的核心保障 — 崩溃后数据不丢失
-    std::fflush(current_file_);
+    if (std::fflush(current_file_) != 0) {
+        SPDLOG_ERROR("WalWriter::write: fflush failed: {}", std::strerror(errno));
+        throw std::runtime_error(
+            "WalWriter::write: fflush failed: " +
+            std::string(std::strerror(errno)));
+    }
     int fd = ::fileno(current_file_);
     if (fd < 0) {
         SPDLOG_ERROR("WalWriter::write: fileno() returned {} (errno={}), skipping fsync",
                      fd, errno);
     } else {
-        ::fsync(fd);  // 系统调用: 强制将文件内容写入磁盘
+        if (::fsync(fd) != 0) {
+            // fsync 失败不抛异常（可能只是警告），但记录错误
+            SPDLOG_ERROR("WalWriter::write: fsync failed (fd={}): {}",
+                         fd, std::strerror(errno));
+        }
     }
 
     SPDLOG_DEBUG("WalWriter: wrote alert_id={} to {} ({} bytes)",

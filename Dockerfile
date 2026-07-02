@@ -126,6 +126,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libstdc++6 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- 从 vcpkg 复制运行时 .so ----
