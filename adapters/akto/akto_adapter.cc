@@ -35,8 +35,8 @@ const std::unordered_map<std::string, int32_t> AktoAdapter::HOST_COLLECTION_FALL
 std::string AktoAdapter::escapeJson(const std::string& s) {
     std::string result;
     result.reserve(s.size() + 16);
-    for (char c : s) {
-        switch (c) {
+    for (unsigned char uc : s) {
+        switch (uc) {
             case '"':  result += "\\\""; break;
             case '\\': result += "\\\\"; break;
             case '\n': result += "\\n";  break;
@@ -45,13 +45,14 @@ std::string AktoAdapter::escapeJson(const std::string& s) {
             case '\b': result += "\\b";  break;
             case '\f': result += "\\f";  break;
             default:
-                if (static_cast<unsigned char>(c) < 0x20) {
+                if (uc < 0x20) {
                     // 控制字符 → \uXXXX
                     char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    snprintf(buf, sizeof(buf), "\\u%04x",
+                             static_cast<unsigned int>(uc));
                     result += buf;
                 } else {
-                    result += c;
+                    result += static_cast<char>(uc);
                 }
                 break;
         }
@@ -82,7 +83,31 @@ bool IpRateLimiter::allow(const std::string& ip, const std::string& account_id,
     }
 
     window.timestamps.push_back(now);
+
+    // 定期清理空窗口，防止 windows_ map 无限增长导致 OOM。
+    // 每处理 1024 次调用执行一次清理（摊销开销极低）。
+    if (++cleanup_counter_ % 1024 == 0) {
+        cleanupEmptyWindows(now);
+    }
+
     return true;
+}
+
+void IpRateLimiter::cleanupEmptyWindows(int64_t now) {
+    // 清理所有时间戳已全部过期（窗口为空）的条目
+    for (auto it = windows_.begin(); it != windows_.end(); ) {
+        auto& w = it->second;
+        // 先清理过期时间戳
+        while (!w.timestamps.empty() && w.timestamps.front() < now - 60) {
+            w.timestamps.pop_front();
+        }
+        // 如果窗口为空，删除该条目
+        if (w.timestamps.empty()) {
+            it = windows_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ============================================================================
@@ -99,15 +124,13 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
     simdjson::ondemand::parser parser;
     simdjson::ondemand::document doc;
 
-    auto error = parser.allocate(alert_json.size());
-    if (error) {
-        spdlog::warn("[akto_adapter] JSON parser allocate failed: {}", simdjson::error_message(error));
-        return "";
-    }
-
-    error = parser.parse(alert_json).get(doc);
+    auto error = parser.parse(alert_json).get(doc);
     if (error) {
         spdlog::warn("[akto_adapter] JSON parse failed: {}", simdjson::error_message(error));
+        // 发送到 DLQ，避免数据丢失
+        if (dlq_) {
+            dlq_->send(alert_json, std::string("JSON parse failed: ") + simdjson::error_message(error));
+        }
         return "";
     }
 
@@ -134,6 +157,7 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
         doc.get_bool("successful_exploit").get(successful_exploit);
     } catch (const simdjson::simdjson_error& e) {
         // 部分字段可能不存在, 继续
+        spdlog::debug("[akto_adapter] Partial field extraction error: {}", e.what());
     }
 
     // ── 功能1: 告警分级过滤 ──
@@ -146,6 +170,10 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
     // ── 功能2: 多租户生命线校验 ──
     if (akto_account_id.empty()) {
         spdlog::warn("[akto_adapter] Dropping alert without akto_account_id: {}", alert_id);
+        // 发送到 DLQ，避免数据丢失
+        if (dlq_) {
+            dlq_->send(alert_json, "Missing akto_account_id");
+        }
         return "";
     }
 
@@ -159,6 +187,10 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
             // 指标: collection_id=0 丢弃
             AktoMetrics::instance().incCollectionIdZeroDrops();
             spdlog::warn("[akto_adapter] Dropping alert: api_collection_id=0 and no host fallback for {}", request_host);
+            // 发送到 DLQ，避免数据丢失
+            if (dlq_) {
+                dlq_->send(alert_json, "api_collection_id=0 and no host fallback");
+            }
             return "";  // 严禁将0注入Akto
         }
     }
@@ -180,6 +212,8 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
 
     // ── 构造 Akto JSON ──
     // filter_id 格式: WGE_{rule_id}
+    // 生成 filter_id: WGE_ + alert_id 前8位
+    // 如果 alert_id 不足8位，使用全部内容（substr 安全处理短字符串）
     std::string filter_id = "WGE_" + alert_id.substr(0, 8);
 
     // detected_at: 毫秒 → 秒

@@ -64,6 +64,18 @@ struct ConsumerConfig {
     /// @brief 分区 fetch 最大字节数
     int32_t fetch_max_bytes{50 * 1024 * 1024};  // 50 MB
 
+    /// @brief 安全协议: "plaintext" | "ssl" | "sasl_plaintext" | "sasl_ssl"
+    std::string security_protocol{"plaintext"};
+
+    /// @brief SASL 机制: "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512" | "GSSAPI"
+    std::string sasl_mechanism{};
+
+    /// @brief SASL 用户名
+    std::string sasl_username{};
+
+    /// @brief SASL 密码
+    std::string sasl_password{};
+
     /// @brief 额外配置属性 (key=value)，传递给底层 rdkafka
     std::vector<std::pair<std::string, std::string>> extra_properties{};
 };
@@ -107,6 +119,18 @@ struct ProducerConfig {
 
     /// @brief 重试间隔 (ms)
     int32_t retry_backoff_ms{100};
+
+    /// @brief 安全协议: "plaintext" | "ssl" | "sasl_plaintext" | "sasl_ssl"
+    std::string security_protocol{"plaintext"};
+
+    /// @brief SASL 机制: "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512" | "GSSAPI"
+    std::string sasl_mechanism{};
+
+    /// @brief SASL 用户名
+    std::string sasl_username{};
+
+    /// @brief SASL 密码
+    std::string sasl_password{};
 
     /// @brief 额外配置属性
     std::vector<std::pair<std::string, std::string>> extra_properties{};

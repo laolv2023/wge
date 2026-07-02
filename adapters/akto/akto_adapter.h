@@ -81,6 +81,12 @@ private:
     };
     std::unordered_map<Key, TimestampWindow, KeyHash> windows_;
     std::mutex mutex_;
+
+    /// 清理计数器，用于触发周期性空窗口清理
+    uint64_t cleanup_counter_{0};
+
+    /// @brief 清理所有时间戳已过期的空窗口条目，防止 windows_ 无限增长
+    void cleanupEmptyWindows(int64_t now);
 };
 
 /**

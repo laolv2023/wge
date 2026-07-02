@@ -277,6 +277,10 @@ wge::kafka::ConsumerConfig bridgeConsumerConfig(
     out.poll_interval_ms = poll_interval_ms;  // 从 detector 配置传入，而非 YAML
     out.session_timeout_ms = cfg.session_timeout_ms;
     out.enable_auto_commit = cfg.enable_auto_commit;
+    out.security_protocol = cfg.security_protocol;
+    out.sasl_mechanism = cfg.sasl_mechanism;
+    out.sasl_username = cfg.sasl_username;
+    out.sasl_password = cfg.sasl_password;
     return out;
 }
 
@@ -298,6 +302,10 @@ wge::kafka::ProducerConfig bridgeProducerConfig(
     out.linger_ms = static_cast<int32_t>(cfg.linger_ms);  // double → int32
     out.retries = cfg.retries;
     out.enable_idempotence = true;  // 默认启用幂等性
+    out.security_protocol = cfg.security_protocol;
+    out.sasl_mechanism = cfg.sasl_mechanism;
+    out.sasl_username = cfg.sasl_username;
+    out.sasl_password = cfg.sasl_password;
     return out;
 }
 
@@ -420,13 +428,15 @@ int main(int argc, char* argv[]) {
     // 完美穿透 AuthenticationInterceptor (100% 零侵入)。
     SPDLOG_INFO("Initializing AktoAdapter...");
     // AktoAdapter 的 DLQ (可选, 用于捕获 Adapter 转换失败的告警)
+    // 使用 producer_cfg (已桥接的 kafka::ProducerConfig) 而非 config.kafka.producer,
+    // 确保安全协议/SASL 配置一致
     auto akto_dlq = std::make_shared<wge::akto::AktoDlq>(
-        config.kafka.producer.bootstrap_servers,
+        producer_cfg.bootstrap_servers,
         "wge-akto-adapter-dlq",
-        config.kafka.producer.security_protocol,
-        config.kafka.producer.sasl_mechanism,
-        config.kafka.producer.sasl_username,
-        config.kafka.producer.sasl_password);
+        producer_cfg.security_protocol,
+        producer_cfg.sasl_mechanism,
+        producer_cfg.sasl_username,
+        producer_cfg.sasl_password);
     wge::akto::AktoAdapter akto_adapter(akto_dlq);
     SPDLOG_INFO("AktoAdapter initialized: output_topic={}",
                 config.kafka.producer.topic);

@@ -51,9 +51,14 @@ std::string AlertBuilder::generateUuidV7() {
     thread_local std::mt19937_64 gen(rd());
     thread_local std::uniform_int_distribution<uint64_t> dist;
 
+    // RFC 9562 UUIDv7 位布局:
+    //   bits [0:47]   = unix_ts_ms (48 bits)
+    //   bits [48:51]  = ver = 0x7 (4 bits)
+    //   bits [52:63]  = rand_a (12 bits)
+    //   bits [64:65]  = var = 0b10 (2 bits)
+    //   bits [66:127] = rand_b (62 bits)
     uint64_t rand_a = dist(gen) & 0xFFF;        // 12 bits 随机部分 A
-    uint64_t rand_b_hi = dist(gen) & 0x3FFFFFFFFFFFFFFFULL;  // 62 bits 高位
-    uint64_t rand_b_lo = dist(gen);             // 64 bits 低位
+    uint64_t rand_b = dist(gen) & 0x3FFFFFFFFFFFFFFFULL;  // 62 bits 随机部分 B
 
     // 时间戳: 取低 48 bits（支持到公元 10889 年）
     uint64_t ts = static_cast<uint64_t>(now_ms) & 0xFFFFFFFFFFFFULL;
@@ -61,22 +66,26 @@ std::string AlertBuilder::generateUuidV7() {
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
 
-    // time_low: timestamp 的 [47:32] 位 → 8 hex
+    // time_low: timestamp 的 [47:16] 位 → 8 hex
     oss << std::setw(8) << (ts >> 16);
     oss << '-';
-    // time_mid: timestamp 的 [31:16] 位 → 4 hex
+    // time_mid: timestamp 的 [15:0] 位 → 4 hex
     oss << std::setw(4) << (ts & 0xFFFF);
     oss << '-';
-    // version (7) + time_high (12 bits): '7' + 3 hex (rand_a 高 4 位填满)
-    oss << '7' << std::setw(3) << ((rand_a >> 8) & 0xFFF);
+    // version (7) + rand_a (12 bits): '7' + 3 hex
+    oss << '7' << std::setw(3) << (rand_a & 0xFFF);
     oss << '-';
-    // variant (10xx) + rand_a[7:0]: variant_byte = 0x80 | (rand_a 中 6 bits)
-    uint16_t variant_byte = 0x80 | ((rand_a >> 4) & 0x3F);  // 0x80 = 0b10000000
-    oss << std::setw(2) << variant_byte;
-    oss << std::setw(2) << (rand_a & 0xFF);  // rand_a 低 8 位
+    // variant (10xx) + rand_b 高 6 位: 2 hex
+    // variant_byte = 0b10xxxxxx = 0x80 | (rand_b >> 56)
+    uint8_t variant_byte = static_cast<uint8_t>(
+        0x80 | ((rand_b >> 56) & 0x3F));
+    oss << std::setw(2) << static_cast<unsigned>(variant_byte);
+    // rand_b 中间 8 位: 2 hex
+    oss << std::setw(2) << static_cast<unsigned>(
+        (rand_b >> 48) & 0xFF);
     oss << '-';
-    // rand_b: 12 hex (48 bits of rand_b_lo)
-    oss << std::setw(12) << (rand_b_lo & 0xFFFFFFFFFFFFULL);
+    // rand_b 低 48 位: 12 hex
+    oss << std::setw(12) << (rand_b & 0xFFFFFFFFFFFFULL);
 
     return oss.str();
 }

@@ -73,14 +73,6 @@ std::expected<FieldType, std::string> parseFieldType(std::string_view str) {
 namespace {
 
 /**
- * @brief 安全获取 YAML 节点下的子节点
- */
-YAML::Node safeGet(const YAML::Node& node, const std::string& key) {
-    if (!node || !node[key]) return YAML::Node(YAML::NodeType::Null);
-    return node[key];
-}
-
-/**
  * @brief 解析 HeaderStrategy
  */
 std::expected<HeaderStrategy, std::string> parseHeaderStrategy(

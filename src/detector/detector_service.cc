@@ -77,8 +77,11 @@ void DetectorService::start() {
     }
 
     // 2. 启动 AlertProducer flush 线程
-    auto* group_meta = consumer_.groupMetadata();
-    producer_.flushLoop(group_meta);
+    // 使用 lambda 每次调用时获取最新的 group_metadata，
+    // 确保 rebalance 后仍能获取有效的 ConsumerGroupMetadata。
+    producer_.flushLoop([this]() {
+        return consumer_.groupMetadata();
+    });
     SPDLOG_INFO("DetectorService::start: AlertProducer flush loop started");
 
     // 3. 启动 Worker 线程池
@@ -111,25 +114,44 @@ void DetectorService::stop() {
     auto shutdown_start = std::chrono::steady_clock::now();
     auto timeout = std::chrono::milliseconds(
         config_.detector.graceful_shutdown_timeout_ms);
+    auto deadline = shutdown_start + timeout;
+
+    auto remaining_ms = [&]() -> int32_t {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return 0;
+        return static_cast<int32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now).count());
+    };
 
     // 1. 停止 Consumer (不再接收新消息)
-    SPDLOG_INFO("DetectorService::stop: step 1/4 - stopping KafkaConsumer");
+    SPDLOG_INFO("DetectorService::stop: step 1/4 - stopping KafkaConsumer (remaining={}ms)",
+                remaining_ms());
     try {
         consumer_.stop();
     } catch (const std::exception& e) {
         SPDLOG_ERROR("DetectorService::stop: KafkaConsumer::stop error: {}", e.what());
     }
 
+    if (remaining_ms() == 0) {
+        SPDLOG_WARN("DetectorService::stop: shutdown timeout exceeded after step 1, forcing stop");
+    }
+
     // 2. 停止 Worker Pool (等待 in-flight 任务完成)
-    SPDLOG_INFO("DetectorService::stop: step 2/4 - draining WgeWorkerPool");
+    SPDLOG_INFO("DetectorService::stop: step 2/4 - draining WgeWorkerPool (remaining={}ms)",
+                remaining_ms());
     try {
         pool_.stop();
     } catch (const std::exception& e) {
         SPDLOG_ERROR("DetectorService::stop: WgeWorkerPool::stop error: {}", e.what());
     }
 
+    if (remaining_ms() == 0) {
+        SPDLOG_WARN("DetectorService::stop: shutdown timeout exceeded after step 2, forcing stop");
+    }
+
     // 3. 关闭 AlertProducer (清空队列 + 最后事务提交)
-    SPDLOG_INFO("DetectorService::stop: step 3/4 - closing AlertProducer");
+    SPDLOG_INFO("DetectorService::stop: step 3/4 - closing AlertProducer (remaining={}ms)",
+                remaining_ms());
     try {
         producer_.close();
     } catch (const std::exception& e) {
@@ -137,7 +159,8 @@ void DetectorService::stop() {
     }
 
     // 4. 关闭 DLQ
-    SPDLOG_INFO("DetectorService::stop: step 4/4 - closing DeadLetterQueue");
+    SPDLOG_INFO("DetectorService::stop: step 4/4 - closing DeadLetterQueue (remaining={}ms)",
+                remaining_ms());
     try {
         dlq_.close();
     } catch (const std::exception& e) {

@@ -90,6 +90,10 @@ struct AlertResult {
     /// @brief 所有匹配的规则列表
     std::vector<MatchedRuleInfo> matched_rules{};
 
+    /// @brief 是否因处理错误而丢弃（processConnection/Uri/Headers 等失败）
+    /// 当为 true 时，workerLoop 应计入 events_dropped 而非 events_processed
+    bool dropped{false};
+
     /**
      * @brief 是否有任何规则匹配
      */

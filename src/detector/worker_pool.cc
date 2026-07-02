@@ -304,6 +304,10 @@ void WgeWorkerPool::workerLoop(int worker_id) {
                             worker_id, config_.task_timeout_ms,
                             event->event_id());
                 metrics_.incrementEventsDropped();
+            } else if (result.dropped) {
+                // detect() 内部处理失败（processConnection/Uri/Headers 等返回 false）
+                // 已在 detect() 中设置 dropped 标志，此处统一计数
+                metrics_.incrementEventsDropped();
             } else if (result.hasMatches()) {
                 // 有规则匹配 → 构建告警并发送
                 auto alert = AlertBuilder::build(
@@ -376,10 +380,10 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
             static_cast<short>(event.upstream_port()))) {
         SPDLOG_WARN("WgeWorkerPool::detect: processConnection failed for event_id={}",
                      event.event_id());
-        metrics_.incrementEventsDropped();
+        result.dropped = true;
         return result;  // 连接处理失败，返回空结果
     }
-    if (timed_out()) return result;  // 协作式超时检查点
+    if (timed_out()) { result.dropped = true; return result; }  // 协作式超时检查点
 
     // ===== 步骤 3: processUri — URI + Method + HTTP 版本 =====
     if (!tx->processUri(
@@ -389,10 +393,10 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     {
         SPDLOG_WARN("WgeWorkerPool::detect: processUri failed for event_id={}",
                      event.event_id());
-        metrics_.incrementEventsDropped();
+        result.dropped = true;
         return result;
     }
-    if (timed_out()) return result;
+    if (timed_out()) { result.dropped = true; return result; }
 
     // ===== 步骤 4: 构建 HttpExtractorAdapter（延迟创建，避免不必要开销）=====
     // adapter 构建 header 索引（小写 key → values 映射），供 WGE 规则检索
@@ -415,10 +419,10 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     {
         SPDLOG_WARN("WgeWorkerPool::detect: processRequestHeaders failed for event_id={}",
                      event.event_id());
-        metrics_.incrementEventsDropped();
+        result.dropped = true;
         return result;
     }
-    if (timed_out()) return result;
+    if (timed_out()) { result.dropped = true; return result; }
 
     // ===== 步骤 6: processRequestBody =====
     // 仅当请求体非空时才调用（避免不必要的处理）
@@ -426,11 +430,11 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
         if (!tx->processRequestBody(event.request_body())) {
             SPDLOG_WARN("WgeWorkerPool::detect: processRequestBody failed for event_id={}",
                          event.event_id());
-            metrics_.incrementEventsDropped();
+            result.dropped = true;
             return result;
         }
     }
-    if (timed_out()) return result;
+    if (timed_out()) { result.dropped = true; return result; }
 
     // ===== 步骤 7: processResponseHeaders =====
     auto resp_header_find = adapter.responseHeaderFind();
@@ -447,17 +451,17 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     {
         SPDLOG_WARN("WgeWorkerPool::detect: processResponseHeaders failed for event_id={}",
                      event.event_id());
-        metrics_.incrementEventsDropped();
+        result.dropped = true;
         return result;
     }
-    if (timed_out()) return result;
+    if (timed_out()) { result.dropped = true; return result; }
 
     // ===== 步骤 8: processResponseBody =====
     if (!event.response_body().empty()) {
         if (!tx->processResponseBody(event.response_body())) {
             SPDLOG_WARN("WgeWorkerPool::detect: processResponseBody failed for event_id={}",
                          event.event_id());
-            metrics_.incrementEventsDropped();
+            result.dropped = true;
             return result;
         }
     }
@@ -480,9 +484,9 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
         result.matched_rules[i].matched_var_original = matched_vars[i].second.second;
     }
 
-    // 规则计数（events_processed 在 workerLoop 中已更新，
-    // rule_evaluations 和 rule_matches 在 onRuleMatch 中已更新）
-    metrics_.addEventsProcessed(1);
+    // 注意: events_processed / events_dropped 计数在 workerLoop() 中统一处理，
+    // rule_evaluations 和 rule_matches 在 onRuleMatch 中已更新。
+    // 此处不再重复计数 events_processed，避免双重计数。
 
     return result;
 }

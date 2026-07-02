@@ -153,13 +153,7 @@ bool DeadLetterQueue::send(const DeadLetterEvent& event) {
 
 bool DeadLetterQueue::sendRaw(const RdKafka::Message& msg,
                                const std::string& error) {
-    std::lock_guard<std::mutex> lock(send_mutex_);
-    if (closed_ || !producer_) {
-        SPDLOG_ERROR("DeadLetterQueue::sendRaw: producer is null or closed");
-        return false;
-    }
-
-    // 构造 DeadLetterEvent
+    // 构造 DeadLetterEvent (不需要持锁)
     DeadLetterEvent event;
 
     // 原始 topic (从 msg 获取)
@@ -183,6 +177,9 @@ bool DeadLetterQueue::sendRaw(const RdKafka::Message& msg,
         now.time_since_epoch()).count();
     event.set_timestamp_ms(now_ms);
 
+    // 调用 send()，由 send() 负责加锁。
+    // 注意: 不能在 sendRaw 中持锁后再调用 send()，因为 std::mutex 不可重入，
+    // 会导致死锁。
     return send(event);
 }
 

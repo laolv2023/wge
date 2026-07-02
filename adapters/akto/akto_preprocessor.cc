@@ -14,6 +14,39 @@
 namespace wge::kafka::adapter {
 
 // =============================================================================
+// 内部辅助: JSON 字符串转义
+// =============================================================================
+
+/// @brief 将字符串转义为 JSON 字符串内容（不含外层引号）
+/// @details 转义规则遵循 RFC 8259:
+///   " → \",  \ → \\,  / → \/ (可选),  \b → \b,  \f → \f,
+///   \n → \n,  \r → \r,  \t → \t,  其他控制字符 → \uXXXX
+static void escapeJsonStringTo(std::ostringstream& out, std::string_view sv) {
+    for (unsigned char uc : sv) {
+        switch (uc) {
+        case '"':  out << "\\\""; break;
+        case '\\': out << "\\\\"; break;
+        case '\b': out << "\\b";  break;
+        case '\f': out << "\\f";  break;
+        case '\n': out << "\\n";  break;
+        case '\r': out << "\\r";  break;
+        case '\t': out << "\\t";  break;
+        default:
+            if (uc < 0x20) {
+                // 控制字符 → \uXXXX
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x",
+                              static_cast<unsigned int>(uc));
+                out << buf;
+            } else {
+                out << static_cast<char>(uc);
+            }
+            break;
+        }
+    }
+}
+
+// =============================================================================
 // 公开接口
 // =============================================================================
 
@@ -82,7 +115,12 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
             int64_t seconds = 0;
             auto int_err = field.value().get_int64().get(seconds);
             if (!int_err) {
-                out << (seconds * 1000);
+                // 溢出保护: seconds * 1000 可能溢出
+                if (seconds > INT64_MAX / 1000 || seconds < INT64_MIN / 1000) {
+                    out << "0";
+                } else {
+                    out << (seconds * 1000);
+                }
             } else {
                 // 尝试按字符串读取
                 std::string_view time_str;
@@ -114,7 +152,9 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
         case ondemand::json_type::string: {
             std::string_view sv;
             field.value().get_string().get(sv);
-            out << "\"" << sv << "\"";
+            out << "\"";
+            escapeJsonStringTo(out, sv);
+            out << "\"";
             break;
         }
         case ondemand::json_type::number: {
@@ -206,22 +246,10 @@ AktoPreprocessor::expandHeaderJsonString(std::string_view header_json_str) {
         // 构建 {"key":"...","value":"..."} 结构
         out << "{\"key\":\"";
         // ── JSON 转义: key ──
-        for (char c : key) {
-            switch (c) {
-            case '"':  out << "\\\""; break;
-            case '\\': out << "\\\\"; break;
-            default:   out << c;      break;
-            }
-        }
+        escapeJsonStringTo(out, key);
         out << "\",\"value\":\"";
         // ── JSON 转义: value ──
-        for (char c : value) {
-            switch (c) {
-            case '"':  out << "\\\""; break;
-            case '\\': out << "\\\\"; break;
-            default:   out << c;      break;
-            }
-        }
+        escapeJsonStringTo(out, value);
         out << "\"}";
     }
     out << "]";
@@ -234,6 +262,8 @@ AktoPreprocessor::fixTimestampSecondsToMs(std::string_view epoch_seconds) {
     // 输入: "1779867214" → 输出: "1779867214000"
     try {
         int64_t sec = std::stoll(std::string(epoch_seconds));
+        // 溢出保护
+        if (sec > INT64_MAX / 1000 || sec < INT64_MIN / 1000) return "0";
         return std::to_string(sec * 1000);
     } catch (...) {
         return "0";

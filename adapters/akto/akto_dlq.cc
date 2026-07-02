@@ -109,12 +109,35 @@ bool AktoDlq::send(const std::string& alert_json, const std::string& error) {
     }
 
     // 构造 DLQ 消息体: JSON 格式, 包含原始告警 + 错误信息 + 时间戳
+    // 注意: error 字符串必须经过 JSON 转义, 否则可能产生无效 JSON 或注入
     std::ostringstream oss;
-    oss << "{\"timestamp_ms\":" 
+    oss << "{\"timestamp_ms\":"
         << std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch()).count()
-        << ",\"error\":\"" << error << "\""
-        << ",\"original_alert\":" << alert_json << "}";
+        << ",\"error\":\"";
+    // JSON 转义 error 字符串
+    for (unsigned char uc : error) {
+        switch (uc) {
+        case '"':  oss << "\\\""; break;
+        case '\\': oss << "\\\\"; break;
+        case '\b': oss << "\\b";  break;
+        case '\f': oss << "\\f";  break;
+        case '\n': oss << "\\n";  break;
+        case '\r': oss << "\\r";  break;
+        case '\t': oss << "\\t";  break;
+        default:
+            if (uc < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x",
+                              static_cast<unsigned int>(uc));
+                oss << buf;
+            } else {
+                oss << static_cast<char>(uc);
+            }
+            break;
+        }
+    }
+    oss << "\",\"original_alert\":" << alert_json << "}";
 
     std::string payload = oss.str();
 

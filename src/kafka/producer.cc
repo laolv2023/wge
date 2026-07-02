@@ -188,6 +188,13 @@ void AlertProducer::sendAlert(std::shared_ptr<WgeAlertEvent> alert) {
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
+        // 队列背压: 防止 broker 宕机时队列无限增长导致 OOM
+        if (alert_queue_.size() >= config_.max_queue_size) {
+            SPDLOG_ERROR("AlertProducer::sendAlert: queue full (size={}, max={}), "
+                         "dropping alert. Broker may be unreachable.",
+                         alert_queue_.size(), config_.max_queue_size);
+            return;  // 丢弃并记录，避免 OOM
+        }
         alert_queue_.push_back(std::move(alert));  // 入队，转移所有权
     }
     queue_cv_.notify_one();  // 通知 flush 线程有新消息

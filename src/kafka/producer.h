@@ -70,6 +70,10 @@ struct ProducerConfig {
     /// @brief 压缩类型: none, gzip, snappy, lz4, zstd
     std::string compression_type{"lz4"};
 
+    /// @brief 内部队列最大容量（防止 broker 宕机时 OOM）
+    /// 当队列满时，新告警将被丢弃并记录警告日志
+    size_t max_queue_size{100000};
+
     /// @brief 安全协议
     std::string security_protocol{};
 

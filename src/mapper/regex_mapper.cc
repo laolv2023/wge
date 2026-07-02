@@ -414,7 +414,11 @@ int64_t RegexMapper::parseTimestamp(
     if (raw.size() == 10 && raw.find_first_not_of("0123456789") == std::string::npos) {
         int64_t sec;
         auto [ptr, ec] = std::from_chars(raw.data(), raw.data() + raw.size(), sec);
-        if (ec == std::errc{}) return sec * 1000;
+        if (ec == std::errc{}) {
+            // 溢出保护: sec * 1000 可能溢出 int64_t
+            if (sec > INT64_MAX / 1000 || sec < INT64_MIN / 1000) return 0;
+            return sec * 1000;
+        }
     }
 
     // 3. ISO 8601 格式: 2024-01-15T10:30:00Z 或 2024-01-15T10:30:00+08:00
@@ -439,7 +443,10 @@ int64_t RegexMapper::parseTimestamp(
             errno = 0;
             auto time_epoch = timegm(&tm);
             if (errno == 0) {
-                int64_t result = static_cast<int64_t>(time_epoch) * 1000 + ms;
+                // 溢出保护: time_epoch * 1000 可能溢出 int64_t
+                int64_t ep = static_cast<int64_t>(time_epoch);
+                if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
+                int64_t result = ep * 1000 + ms;
 
                 // 调整时区
                 if (parsed >= 9) {
@@ -463,7 +470,10 @@ int64_t RegexMapper::parseTimestamp(
             errno = 0;
             auto time_epoch = timegm(&tm2);
             if (errno == 0) {
-                return static_cast<int64_t>(time_epoch) * 1000;
+                // 溢出保护
+                int64_t ep = static_cast<int64_t>(time_epoch);
+                if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
+                return ep * 1000;
             }
         }
     }
@@ -500,7 +510,10 @@ int64_t RegexMapper::parseTimestamp(
                 errno = 0;
                 auto time_epoch = timegm(&tm);
                 if (errno == 0) {
-                    int64_t result = static_cast<int64_t>(time_epoch) * 1000;
+                    // 溢出保护
+                    int64_t ep = static_cast<int64_t>(time_epoch);
+                    if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
+                    int64_t result = ep * 1000;
                     int tz_offset = tz_h * 3600 + tz_m * 60;
                     if (tz_sign_c == '-') tz_offset = -tz_offset;
                     result -= static_cast<int64_t>(tz_offset) * 1000;
@@ -523,7 +536,10 @@ int64_t RegexMapper::parseTimestamp(
             errno = 0;
             auto time_epoch = timegm(&tm);
             if (errno == 0) {
-                return static_cast<int64_t>(time_epoch) * 1000;
+                // 溢出保护
+                int64_t ep = static_cast<int64_t>(time_epoch);
+                if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
+                return ep * 1000;
             }
         }
     }

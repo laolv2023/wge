@@ -348,7 +348,15 @@ int64_t FieldApplier::parseTimestamp(
             int64_t sec;
             auto [ptr, ec] =
                 std::from_chars(raw.data(), raw.data() + raw.size(), sec);
-            if (ec == std::errc{}) return sec * 1000;  // 秒 → 毫秒
+            if (ec == std::errc{}) {
+                // 溢出保护: sec * 1000 可能溢出 int64_t
+                // INT64_MAX / 1000 ≈ 9.2e15，对应年份约公元 292277026596
+                // 正常 Unix 秒时间戳远小于此，但仍做防御性检查
+                if (sec > INT64_MAX / 1000 || sec < INT64_MIN / 1000) {
+                    return 0;  // 溢出，返回 0
+                }
+                return sec * 1000;  // 秒 → 毫秒
+            }
         }
         if (raw.size() == 16) {
             // Unix epoch microseconds (16 位: 如 1705313400000000)
@@ -369,7 +377,12 @@ int64_t FieldApplier::parseTimestamp(
                 errno = 0;
                 auto epoch = timegm(&tm);  // UTC 时间（非本地时间）
                 if (errno == 0) {
-                    return static_cast<int64_t>(epoch) * 1000;
+                    // 溢出保护: epoch * 1000 可能溢出
+                    int64_t ep = static_cast<int64_t>(epoch);
+                    if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) {
+                        return 0;
+                    }
+                    return ep * 1000;
                 }
             }
         }
@@ -417,7 +430,10 @@ int64_t FieldApplier::parseTimestamp(
             errno = 0;
             auto epoch = timegm(&tm);  // UTC 秒
             if (errno == 0) {
-                int64_t result = static_cast<int64_t>(epoch) * 1000 + ms;
+                // 溢出保护
+                int64_t ep = static_cast<int64_t>(epoch);
+                if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
+                int64_t result = ep * 1000 + ms;
 
                 // 减去时区偏移（因为 timegm 假设 UTC 输入）
                 if (parsed >= 9) {
@@ -571,11 +587,10 @@ std::string FieldApplier::base64Decode(std::string_view encoded) {
         }
     }
 
-    // 冲洗循环结束后残留的未完整字节
-    // (base64每4字符编码3字节，当输入不是4的倍数时残留val位)
-    if (valb > -8) {
-        result.push_back(static_cast<char>((val << (-valb)) & 0xFF));
-    }
+    // 注意: 不再 flush 残留位。
+    // 标准 Base64 要求输入为 4 的倍数（不足时用 '=' 填充）。
+    // 残留位（valb > -8）意味着输入不完整，此时输出残留字节会产生垃圾数据。
+    // 安全做法: 丢弃残留位，只输出完整的 8 位字节。
 
     return result;
 }

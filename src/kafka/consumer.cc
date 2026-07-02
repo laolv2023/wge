@@ -242,6 +242,15 @@ int64_t KafkaConsumer::consumerLag() const {
         }
     }
     // 锁外：逐个分区查询 lag（committed + get_watermark_offsets 都是阻塞 I/O）
+    // 使用 RAII 确保 partitions 中的所有 TopicPartition* 都被释放，
+    // 即使中途抛出异常也不会泄漏。
+    struct TopicPartitionDeleter {
+        std::vector<RdKafka::TopicPartition*>& vec;
+        ~TopicPartitionDeleter() {
+            for (auto* tp : vec) delete tp;
+            vec.clear();
+        }
+    } deleter{partitions};
 
     int64_t total_lag = 0;
     for (auto* tp : partitions) {
@@ -271,8 +280,7 @@ int64_t KafkaConsumer::consumerLag() const {
                 total_lag += high;  // 无 committed offset，将全部消息视为 lag
             }
         }
-
-        delete tp;  // rdkafka 要求调用方释放 TopicPartition 内存
+        // 注意: 不在此处 delete tp，由 RAII deleter 统一释放
     }
 
     return total_lag;
@@ -297,6 +305,15 @@ int64_t KafkaConsumer::committedOffset() const {
     }
 
     // 释放锁后逐个调用阻塞 API
+    // 使用 RAII 确保 partitions 中的所有 TopicPartition* 都被释放
+    struct TopicPartitionDeleter {
+        std::vector<RdKafka::TopicPartition*>& vec;
+        ~TopicPartitionDeleter() {
+            for (auto* tp : vec) delete tp;
+            vec.clear();
+        }
+    } deleter{partitions};
+
     int64_t total_committed = 0;
     for (auto* tp : partitions) {
         std::vector<RdKafka::TopicPartition*> tp_vec = {tp};
@@ -305,7 +322,7 @@ int64_t KafkaConsumer::committedOffset() const {
         if (committed_err == RdKafka::ERR_NO_ERROR) {
             total_committed += tp_vec[0]->offset();
         }
-        delete tp;
+        // 注意: 不在此处 delete tp，由 RAII deleter 统一释放
     }
 
     return total_committed;
@@ -374,10 +391,19 @@ void KafkaConsumer::pollLoop() {
 
         case RdKafka::ERR__REVOKE_PARTITIONS:
             // Rebalance: 分区被撤销
-            // 1. 投递当前批次中的消息（在失去分区所有权前）
+            // 1. 先投递当前批次中的消息（在失去分区所有权前），避免数据丢失
             // 2. 调用 assign(空) 显式确认撤销
-            SPDLOG_INFO("KafkaConsumer: partitions revoked, clearing current batch "
-                        "({} messages)", batch.size());
+            SPDLOG_INFO("KafkaConsumer: partitions revoked, flushing current batch "
+                        "({} messages) before clearing", batch.size());
+            // 先投递当前批次，避免已 poll 但未处理的消息丢失
+            if (!batch.empty() && on_batch_) {
+                try {
+                    on_batch_(std::move(batch));
+                } catch (const std::exception& e) {
+                    SPDLOG_ERROR("KafkaConsumer: on_batch exception during revoke: {}",
+                                 e.what());
+                }
+            }
             {
                 std::vector<RdKafka::TopicPartition*> empty;
                 consumer_->assign(empty);  // 空列表 = 放弃所有分区

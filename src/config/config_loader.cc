@@ -169,6 +169,14 @@ void parseConsumer(ConsumerConfig& cfg, const YAML::Node& node) {
                  getOptionalInt32(node, "fetch_min_bytes"));
     setIfPresent(cfg.fetch_max_bytes,
                  getOptionalInt32(node, "fetch_max_bytes"));
+    setIfPresent(cfg.security_protocol,
+                 getOptionalString(node, "security_protocol"));
+    setIfPresent(cfg.sasl_mechanism,
+                 getOptionalString(node, "sasl_mechanism"));
+    setIfPresent(cfg.sasl_username,
+                 getOptionalString(node, "sasl_username"));
+    setIfPresent(cfg.sasl_password,
+                 getOptionalString(node, "sasl_password"));
 }
 
 /**
@@ -189,6 +197,14 @@ void parseProducer(ProducerConfig& cfg, const YAML::Node& node) {
     setIfPresent(cfg.retries, getOptionalInt32(node, "retries"));
     setIfPresent(cfg.retry_backoff_ms,
                  getOptionalInt32(node, "retry_backoff_ms"));
+    setIfPresent(cfg.security_protocol,
+                 getOptionalString(node, "security_protocol"));
+    setIfPresent(cfg.sasl_mechanism,
+                 getOptionalString(node, "sasl_mechanism"));
+    setIfPresent(cfg.sasl_username,
+                 getOptionalString(node, "sasl_username"));
+    setIfPresent(cfg.sasl_password,
+                 getOptionalString(node, "sasl_password"));
 }
 
 /**
