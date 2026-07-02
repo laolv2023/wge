@@ -462,4 +462,204 @@ TEST_F(AktoAdapterTest, BatchProcessing50Events) {
     EXPECT_EQ(success, 50);
 }
 
+// =============================================================================
+// 测试 14: AktoAdapter convert() — 告警分级过滤 (RateLimit 应被丢弃)
+// =============================================================================
+
+TEST_F(AktoAdapterTest, AdapterConvertDropsRateLimit) {
+    wge::akto::AktoAdapter adapter;
+    // 构造 RateLimit 类型告警, 应被过滤阀丢弃
+    std::string alert_json = R"({
+        "alert_id":"test-001",
+        "timestamp_ms":1719500000000,
+        "attack_type":"RateLimit",
+        "severity":"LOW",
+        "request_method":"GET",
+        "request_uri":"/api/test",
+        "downstream_ip":"10.0.0.1",
+        "akto_account_id":"1000000",
+        "akto_collection_id":1,
+        "request_host":"api.example.com",
+        "request_body":"",
+        "response_status":"200",
+        "successful_exploit":false
+    })";
+    std::string result = adapter.convert(alert_json);
+    EXPECT_TRUE(result.empty()) << "RateLimit alert should be filtered out";
+}
+
+// =============================================================================
+// 测试 15: AktoAdapter convert() — 正常告警应输出 Akto JSON
+// =============================================================================
+
+TEST_F(AktoAdapterTest, AdapterConvertProducesAktoJson) {
+    wge::akto::AktoAdapter adapter;
+    std::string alert_json = R"({
+        "alert_id":"test-002",
+        "timestamp_ms":1719500000000,
+        "attack_type":"SQLi",
+        "severity":"HIGH",
+        "request_method":"GET",
+        "request_uri":"/api/search?q=1",
+        "downstream_ip":"10.0.0.2",
+        "akto_account_id":"1000000",
+        "akto_collection_id":1,
+        "request_host":"api.example.com",
+        "request_body":"test payload",
+        "response_status":"200",
+        "successful_exploit":false
+    })";
+    std::string result = adapter.convert(alert_json);
+    EXPECT_FALSE(result.empty());
+    // 验证关键字段
+    EXPECT_NE(result.find("\"account_id\":\"1000000\""), std::string::npos);
+    EXPECT_NE(result.find("\"sub_category\":\"SQLInjection\""), std::string::npos);
+    EXPECT_NE(result.find("\"context_source\":\"API\""), std::string::npos);
+    EXPECT_NE(result.find("\"label\":\"THREAT\""), std::string::npos);
+    EXPECT_NE(result.find("\"successful_exploit\":false"), std::string::npos);
+}
+
+// =============================================================================
+// 测试 16: AktoAdapter convert() — 缺少 akto_account_id 应被丢弃
+// =============================================================================
+
+TEST_F(AktoAdapterTest, AdapterConvertDropsMissingAccountId) {
+    wge::akto::AktoAdapter adapter;
+    std::string alert_json = R"({
+        "alert_id":"test-003",
+        "timestamp_ms":1719500000000,
+        "attack_type":"SQLi",
+        "severity":"HIGH",
+        "request_method":"GET",
+        "request_uri":"/api/test",
+        "downstream_ip":"10.0.0.3",
+        "akto_account_id":"",
+        "akto_collection_id":1,
+        "request_host":"api.example.com",
+        "request_body":"",
+        "response_status":"200",
+        "successful_exploit":false
+    })";
+    std::string result = adapter.convert(alert_json);
+    EXPECT_TRUE(result.empty()) << "Missing account_id should be dropped";
+}
+
+// =============================================================================
+// 测试 17: AktoAdapter convert() — collection_id=0 且 Host 无兜底应被丢弃
+// =============================================================================
+
+TEST_F(AktoAdapterTest, AdapterConvertDropsZeroCollectionIdNoFallback) {
+    wge::akto::AktoAdapter adapter;
+    std::string alert_json = R"({
+        "alert_id":"test-004",
+        "timestamp_ms":1719500000000,
+        "attack_type":"SQLi",
+        "severity":"HIGH",
+        "request_method":"GET",
+        "request_uri":"/api/test",
+        "downstream_ip":"10.0.0.4",
+        "akto_account_id":"1000000",
+        "akto_collection_id":0,
+        "request_host":"unknown.example.com",
+        "request_body":"",
+        "response_status":"200",
+        "successful_exploit":false
+    })";
+    std::string result = adapter.convert(alert_json);
+    EXPECT_TRUE(result.empty()) << "collection_id=0 with no host fallback should be dropped";
+}
+
+// =============================================================================
+// 测试 18: AktoAdapter convert() — collection_id=0 但 Host 有兜底应成功
+// =============================================================================
+
+TEST_F(AktoAdapterTest, AdapterConvertCollectionIdFallback) {
+    wge::akto::AktoAdapter adapter;
+    std::string alert_json = R"({
+        "alert_id":"test-005",
+        "timestamp_ms":1719500000000,
+        "attack_type":"SQLi",
+        "severity":"HIGH",
+        "request_method":"GET",
+        "request_uri":"/api/test",
+        "downstream_ip":"10.0.0.5",
+        "akto_account_id":"1000000",
+        "akto_collection_id":0,
+        "request_host":"api.example.com",
+        "request_body":"",
+        "response_status":"200",
+        "successful_exploit":false
+    })";
+    std::string result = adapter.convert(alert_json);
+    EXPECT_FALSE(result.empty());
+    // 兜底后 collection_id 应为 1
+    EXPECT_NE(result.find("\"latest_api_collection_id\":1"), std::string::npos);
+}
+
+// =============================================================================
+// 测试 19: AktoAdapter convert() — JSON 转义 (特殊字符不注入)
+// =============================================================================
+
+TEST_F(AktoAdapterTest, AdapterConvertJsonEscaping) {
+    wge::akto::AktoAdapter adapter;
+    // request_uri 包含双引号和反斜杠, 验证转义
+    std::string alert_json = R"({
+        "alert_id":"test-006",
+        "timestamp_ms":1719500000000,
+        "attack_type":"XSS",
+        "severity":"HIGH",
+        "request_method":"GET",
+        "request_uri":"/api/search?q=\"<script>",
+        "downstream_ip":"10.0.0.6",
+        "akto_account_id":"1000000",
+        "akto_collection_id":1,
+        "request_host":"api.example.com",
+        "request_body":"",
+        "response_status":"200",
+        "successful_exploit":false
+    })";
+    std::string result = adapter.convert(alert_json);
+    EXPECT_FALSE(result.empty());
+    // 验证输出 JSON 中没有未转义的双引号导致 JSON 破坏
+    // 检查 sub_category 为 XSS
+    EXPECT_NE(result.find("\"sub_category\":\"XSS\""), std::string::npos);
+}
+
+// =============================================================================
+// 测试 20: AktoAdapter convert() — IP 限流 (第6条应被丢弃)
+// =============================================================================
+
+TEST_F(AktoAdapterTest, AdapterConvertIpRateLimit) {
+    wge::akto::AktoAdapter adapter;
+    std::string base_json = R"({
+        "alert_id":"test-rate-",
+        "timestamp_ms":1719500000000,
+        "attack_type":"SQLi",
+        "severity":"HIGH",
+        "request_method":"GET",
+        "request_uri":"/api/test",
+        "downstream_ip":"10.0.0.99",
+        "akto_account_id":"1000000",
+        "akto_collection_id":1,
+        "request_host":"api.example.com",
+        "request_body":"",
+        "response_status":"200",
+        "successful_exploit":false
+    })";
+
+    // 前5条应通过
+    for (int i = 0; i < 5; ++i) {
+        std::string json = base_json;
+        json.replace(json.find("test-rate-"), 10, "test-rate-" + std::to_string(i));
+        std::string result = adapter.convert(json);
+        EXPECT_FALSE(result.empty()) << "Alert " << i << " should pass rate limiter";
+    }
+
+    // 第6条应被限流丢弃
+    std::string json6 = base_json;
+    json6.replace(json6.find("test-rate-"), 10, "test-rate-5");
+    std::string result6 = adapter.convert(json6);
+    EXPECT_TRUE(result6.empty()) << "6th alert from same IP should be rate limited";
+}
+
 } // namespace

@@ -4,9 +4,17 @@
  *
  * 将 WgeAlertEvent 转换为 Akto MaliciousEventKafkaEnvelope JSON 格式,
  * 写入 akto.threat_detection.malicious_events Topic。
+ *
+ * V6.0 升级:
+ *   - 集成 Prometheus 指标埋点
+ *   - 集成 DLQ 死信队列
+ *   - JSON 字符串转义防注入
  */
 
 #include "akto_adapter.h"
+#include "akto_metrics.h"
+#include "akto_dlq.h"
+
 #include <spdlog/spdlog.h>
 #include <simdjson.h>
 #include <chrono>
@@ -20,7 +28,40 @@ const std::unordered_map<std::string, int32_t> AktoAdapter::HOST_COLLECTION_FALL
     {"admin.example.com", 2},
 };
 
-// ── IpRateLimiter ──
+// ============================================================================
+// JSON 字符串转义 (防止注入)
+// ============================================================================
+
+std::string AktoAdapter::escapeJson(const std::string& s) {
+    std::string result;
+    result.reserve(s.size() + 16);
+    for (char c : s) {
+        switch (c) {
+            case '"':  result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\n': result += "\\n";  break;
+            case '\r': result += "\\r";  break;
+            case '\t': result += "\\t";  break;
+            case '\b': result += "\\b";  break;
+            case '\f': result += "\\f";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    // 控制字符 → \uXXXX
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    result += buf;
+                } else {
+                    result += c;
+                }
+                break;
+        }
+    }
+    return result;
+}
+
+// ============================================================================
+// IpRateLimiter
+// ============================================================================
 
 bool IpRateLimiter::allow(const std::string& ip, const std::string& account_id,
                            const std::string& category, int max_per_minute) {
@@ -44,9 +85,17 @@ bool IpRateLimiter::allow(const std::string& ip, const std::string& account_id,
     return true;
 }
 
-// ── AktoAdapter ──
+// ============================================================================
+// AktoAdapter
+// ============================================================================
+
+AktoAdapter::AktoAdapter(std::shared_ptr<AktoDlq> dlq)
+    : dlq_(std::move(dlq)) {}
 
 std::string AktoAdapter::convert(const std::string& alert_json) {
+    // 指标: 告警消费计数
+    AktoMetrics::instance().incAlertsConsumed();
+
     simdjson::ondemand::parser parser;
     simdjson::ondemand::document doc;
 
@@ -107,6 +156,8 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
             akto_collection_id = it->second;
             spdlog::info("[akto_adapter] Collection ID fallback: host={} → id={}", request_host, akto_collection_id);
         } else {
+            // 指标: collection_id=0 丢弃
+            AktoMetrics::instance().incCollectionIdZeroDrops();
             spdlog::warn("[akto_adapter] Dropping alert: api_collection_id=0 and no host fallback for {}", request_host);
             return "";  // 严禁将0注入Akto
         }
@@ -121,6 +172,8 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
 
     // ── 功能5: IP 级限流 (≤5条/分钟/IP+Account+Category) ──
     if (!rate_limiter_.allow(downstream_ip, akto_account_id, sub_category)) {
+        // 指标: 限流丢弃
+        AktoMetrics::instance().incRateLimitedDrops();
         spdlog::debug("[akto_adapter] Rate limited: ip={} category={}", downstream_ip, sub_category);
         return "";
     }
@@ -135,32 +188,35 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
     // 保守穿透判定: 始终 false (避免与 Akto YAML 规则冲突)
     // successful_exploit 已从 proto 读取, 默认 false
 
-    // 构造 JSON
+    // 构造 JSON (所有字符串字段使用 escapeJson 转义, 防止注入)
     std::ostringstream oss;
     oss << "{";
     // MaliciousEventKafkaEnvelope
-    oss << "\"account_id\":\"" << akto_account_id << "\",";
-    oss << "\"actor\":\"" << downstream_ip << "\",";
+    oss << "\"account_id\":\"" << escapeJson(akto_account_id) << "\",";
+    oss << "\"actor\":\"" << escapeJson(downstream_ip) << "\",";
     oss << "\"malicious_event\":{";
     // MaliciousEventMessage
-    oss << "\"actor\":\"" << downstream_ip << "\",";
-    oss << "\"filter_id\":\"" << filter_id << "\",";
+    oss << "\"actor\":\"" << escapeJson(downstream_ip) << "\",";
+    oss << "\"filter_id\":\"" << escapeJson(filter_id) << "\",";
     oss << "\"detected_at\":" << detected_at << ",";
-    oss << "\"latest_api_ip\":\"" << downstream_ip << "\",";
-    oss << "\"latest_api_endpoint\":\"" << request_uri << "\",";
-    oss << "\"latest_api_method\":\"" << request_method << "\",";
+    oss << "\"latest_api_ip\":\"" << escapeJson(downstream_ip) << "\",";
+    oss << "\"latest_api_endpoint\":\"" << escapeJson(request_uri) << "\",";
+    oss << "\"latest_api_method\":\"" << escapeJson(request_method) << "\",";
     oss << "\"latest_api_collection_id\":" << akto_collection_id << ",";
-    oss << "\"latest_api_payload\":\"" << request_body << "\",";
+    oss << "\"latest_api_payload\":\"" << escapeJson(request_body) << "\",";
     oss << "\"event_type\":1,";  // EVENT_TYPE_SINGLE
     oss << "\"category\":\"ApiAbuse\",";
-    oss << "\"sub_category\":\"" << sub_category << "\",";
-    oss << "\"severity\":\"" << severity << "\",";
+    oss << "\"sub_category\":\"" << escapeJson(sub_category) << "\",";
+    oss << "\"severity\":\"" << escapeJson(severity) << "\",";
     oss << "\"successful_exploit\":" << (successful_exploit ? "true" : "false") << ",";
     oss << "\"label\":\"THREAT\",";
-    oss << "\"host\":\"" << request_host << "\",";
-    oss << "\"status\":\"" << response_status << "\",";
+    oss << "\"host\":\"" << escapeJson(request_host) << "\",";
+    oss << "\"status\":\"" << escapeJson(response_status) << "\",";
     oss << "\"context_source\":\"API\"";
     oss << "}}";
+
+    // 指标: Akto 事件产出计数
+    AktoMetrics::instance().incAktoEventsProduced();
 
     return oss.str();
 }

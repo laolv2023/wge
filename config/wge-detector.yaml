@@ -23,7 +23,7 @@ kafka:
   # Producer 配置 (告警输出)
   producer:
     bootstrap_servers: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
-    topic: "wge-alert"                      # [可配置] 告警 Topic
+    topic: "akto.threat_detection.malicious_events"  # Akto 告警总线 Topic (借船出海注入)
     acks: "all"                             # 确保所有 ISR 确认
     enable_idempotence: true                # 幂等 Producer
     compression_type: "lz4"

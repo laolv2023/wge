@@ -41,6 +41,8 @@
 #include "detector/worker_pool.h"
 #include "kafka/consumer.h"
 #include "kafka/dlq.h"
+#include "akto/akto_adapter.h"
+#include "akto/akto_dlq.h"
 #include "kafka/producer.h"
 #include "mapper/mapper.h"
 #include "mapper/mapper_config.h"
@@ -410,6 +412,24 @@ int main(int argc, char* argv[]) {
         config.kafka.producer.dlq_topic);
     SPDLOG_INFO("DeadLetterQueue initialized: topic={}",
                 config.kafka.producer.dlq_topic);
+
+    // ---- 9.5 初始化 AktoAdapter (V6.0: 借船出海注入 Akto 告警总线) ----
+    // 设计报告第5章: AktoAdapter 将 WgeAlertEvent 转换为 MaliciousEventKafkaEnvelope JSON,
+    // 由 AlertProducer 发送到 akto.threat_detection.malicious_events Topic。
+    // Akto 原生 SendMaliciousEventsToBackend 任务会消费此 Topic 并转发至 Backend,
+    // 完美穿透 AuthenticationInterceptor (100% 零侵入)。
+    SPDLOG_INFO("Initializing AktoAdapter...");
+    // AktoAdapter 的 DLQ (可选, 用于捕获 Adapter 转换失败的告警)
+    auto akto_dlq = std::make_shared<wge::akto::AktoDlq>(
+        config.kafka.producer.bootstrap_servers,
+        "wge-akto-adapter-dlq",
+        config.kafka.producer.security_protocol,
+        config.kafka.producer.sasl_mechanism,
+        config.kafka.producer.sasl_username,
+        config.kafka.producer.sasl_password);
+    wge::akto::AktoAdapter akto_adapter(akto_dlq);
+    SPDLOG_INFO("AktoAdapter initialized: output_topic={}",
+                config.kafka.producer.topic);
 
     // ---- 10. 初始化 WgeWorkerPool ----
     WorkerConfig worker_cfg;

@@ -9,11 +9,17 @@
  *   4. 上下文与标签强制打标 (context_source / label)
  *   5. api_collection_id 防0兜底
  *
+ * V6.0 升级新增:
+ *   - Prometheus 指标埋点 (4 个 Counter)
+ *   - DLQ 死信队列集成 (发送失败告警不丢失)
+ *   - JSON 字符串转义 (防止注入)
+ *
  * 来源: 架构设计报告第5章 + Akto proto MaliciousEventMessage
  */
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <chrono>
@@ -21,6 +27,9 @@
 #include <deque>
 
 namespace wge::akto {
+
+// 前向声明
+class AktoDlq;
 
 /**
  * @brief Akto 攻击类型映射表 (WGE攻击类型 → Akto sub_category)
@@ -104,6 +113,10 @@ private:
  */
 class AktoAdapter {
 public:
+    /// @brief 构造函数, 可选注入 DLQ
+    /// @param dlq 死信队列指针 (可选, 为 nullptr 时 DLQ 功能禁用)
+    explicit AktoAdapter(std::shared_ptr<AktoDlq> dlq = nullptr);
+
     /**
      * @brief 处理一条 WGE 告警, 返回 Akto 兼容的 JSON 字符串
      *
@@ -121,6 +134,7 @@ public:
 
 private:
     IpRateLimiter rate_limiter_;
+    std::shared_ptr<AktoDlq> dlq_;  ///< 死信队列 (可选)
 
     /// api_collection_id 防0兜底: Host → CollectionID 映射
     static const std::unordered_map<std::string, int32_t> HOST_COLLECTION_FALLBACK;
@@ -142,6 +156,9 @@ private:
         const std::string& host,
         const std::string& status
     );
+
+    /// @brief JSON 字符串转义 (防止注入, 处理引号/反斜杠/控制字符)
+    static std::string escapeJson(const std::string& s);
 };
 
 }  // namespace wge::akto

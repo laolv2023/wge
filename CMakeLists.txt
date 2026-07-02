@@ -64,6 +64,11 @@ set(CORE_SOURCES
     src/wal/wal_relay.h src/wal/wal_relay.cc
     # Metrics
     src/metrics/metrics.h src/metrics/metrics.cc
+    # Akto Adapter (WGE 接入 Akto 的协议转换层)
+    adapters/akto/akto_adapter.h adapters/akto/akto_adapter.cc
+    adapters/akto/akto_preprocessor.h adapters/akto/akto_preprocessor.cc
+    adapters/akto/akto_metrics.h
+    adapters/akto/akto_dlq.h adapters/akto/akto_dlq.cc
     # Proto
     ${PROTO_SRCS} ${PROTO_HDRS}
 )
@@ -71,6 +76,7 @@ set(CORE_SOURCES
 add_library(wge_kafka_detector_core STATIC ${CORE_SOURCES})
 target_include_directories(wge_kafka_detector_core PUBLIC
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/adapters
     ${CMAKE_BINARY_DIR}
 )
 target_link_libraries(wge_kafka_detector_core PUBLIC
@@ -106,6 +112,8 @@ if(WGE_DETECTOR_ENABLE_TESTS AND GTest_FOUND)
         test/unit/test_offset_manager.cc
         test/unit/test_config_loader.cc
         test/unit/test_worker_pool.cc
+        # Akto Adapter 集成测试
+        adapters/akto/test_akto_adapter.cc
     )
     add_executable(wge_detector_test ${TEST_SOURCES})
     target_link_libraries(wge_detector_test PRIVATE
