@@ -418,19 +418,24 @@ void KafkaConsumer::pollLoop() {
             SPDLOG_INFO("KafkaConsumer: partitions assigned/re-assigned");
             {
                 std::vector<RdKafka::TopicPartition*> assigned;
+                // RAII: 确保 assigned 中的所有 TopicPartition* 都被释放
+                struct TpDeleter {
+                    std::vector<RdKafka::TopicPartition*>& v;
+                    ~TpDeleter() {
+                        for (auto* tp : v) delete tp;
+                        v.clear();
+                    }
+                } tp_deleter{assigned};
+
                 RdKafka::ErrorCode assign_err = consumer_->assignment(assigned);
                 if (assign_err == RdKafka::ERR_NO_ERROR) {
                     for (auto* tp : assigned) {
                         SPDLOG_INFO("KafkaConsumer: assigned partition {} [{}]",
                                     tp->topic(), tp->partition());
-                        delete tp;  // rdkafka 要求调用方释放
                     }
                 } else {
                     SPDLOG_WARN("KafkaConsumer: failed to get assignment: {}",
                                 errorString(assign_err));
-                    for (auto* tp : assigned) {
-                        delete tp;
-                    }
                 }
             }
             // Rebalance 后投递当前批次（避免消息丢失）

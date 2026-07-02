@@ -262,8 +262,11 @@ void DetectorService::onConsumerBatch(
                          submitted);
         } catch (const std::exception& e) {
             SPDLOG_ERROR("DetectorService: submitBatch failed: {}", e.what());
-            // 异常情况下 events 已丢失 (被 move) — 这在生产环境不应发生
-            // 若确实发生，已通过日志记录
+            // 异常情况下 events 已被 move，无法恢复。
+            // 记录错误并增加 dropped 计数，便于监控告警。
+            metrics_.incrementEventsDropped();
+            // 注意: events 已被 std::move，此处无法发送到 DLQ。
+            // 生产环境应确保 submitBatch 不抛异常（内部应有容错）。
         }
     }
 }

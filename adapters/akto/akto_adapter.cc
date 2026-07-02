@@ -217,7 +217,16 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
     std::string filter_id = "WGE_" + alert_id.substr(0, 8);
 
     // detected_at: 毫秒 → 秒
-    int64_t detected_at = timestamp_ms / 1000;
+    // 如果 timestamp_ms 为 0（字段提取失败），使用当前时间作为兜底
+    int64_t detected_at;
+    if (timestamp_ms > 0) {
+        detected_at = timestamp_ms / 1000;
+    } else {
+        detected_at = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        spdlog::warn("[akto_adapter] timestamp_ms is 0 or missing for alert {}, "
+                     "using current time as detected_at", alert_id);
+    }
 
     // 保守穿透判定: 始终 false (避免与 Akto YAML 规则冲突)
     // successful_exploit 已从 proto 读取, 默认 false

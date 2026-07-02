@@ -53,24 +53,34 @@ std::string simdjsonValueToString(simdjson::ondemand::value element) {
 
     switch (element.type()) {
         case simdjson_type::string: {
-            std::string_view sv = element.get_string().value_unsafe();
+            auto r = element.get_string();
+            if (r.error()) return "";
+            std::string_view sv = r.value();
             result.assign(sv.data(), sv.size());
             break;
         }
         case simdjson_type::int64: {
-            result = std::to_string(element.get_int64().value_unsafe());
+            auto r = element.get_int64();
+            if (r.error()) return "";
+            result = std::to_string(r.value());
             break;
         }
         case simdjson_type::uint64: {
-            result = std::to_string(element.get_uint64().value_unsafe());
+            auto r = element.get_uint64();
+            if (r.error()) return "";
+            result = std::to_string(r.value());
             break;
         }
         case simdjson_type::double_type: {
-            result = std::to_string(element.get_double().value_unsafe());
+            auto r = element.get_double();
+            if (r.error()) return "";
+            result = std::to_string(r.value());
             break;
         }
         case simdjson_type::boolean: {
-            result = element.get_bool().value_unsafe() ? "true" : "false";
+            auto r = element.get_bool();
+            if (r.error()) return "";
+            result = r.value() ? "true" : "false";
             break;
         }
         case simdjson_type::null_value: {
@@ -119,17 +129,30 @@ std::string domElementToString(simdjson::dom::element element) {
     using namespace simdjson;
     switch (element.type()) {
         case dom::element_type::STRING: {
-            std::string_view sv = element.get_string().value_unsafe();
-            return std::string(sv);
+            auto r = element.get_string();
+            if (r.error()) return "";
+            return std::string(r.value());
         }
-        case dom::element_type::INT64:
-            return std::to_string(element.get_int64().value_unsafe());
-        case dom::element_type::UINT64:
-            return std::to_string(element.get_uint64().value_unsafe());
-        case dom::element_type::DOUBLE:
-            return std::to_string(element.get_double().value_unsafe());
-        case dom::element_type::BOOL:
-            return element.get_bool().value_unsafe() ? "true" : "false";
+        case dom::element_type::INT64: {
+            auto r = element.get_int64();
+            if (r.error()) return "";
+            return std::to_string(r.value());
+        }
+        case dom::element_type::UINT64: {
+            auto r = element.get_uint64();
+            if (r.error()) return "";
+            return std::to_string(r.value());
+        }
+        case dom::element_type::DOUBLE: {
+            auto r = element.get_double();
+            if (r.error()) return "";
+            return std::to_string(r.value());
+        }
+        case dom::element_type::BOOL: {
+            auto r = element.get_bool();
+            if (r.error()) return "";
+            return r.value() ? "true" : "false";
+        }
         case dom::element_type::NULL_VALUE:
             return std::string("");
         default:
@@ -279,7 +302,14 @@ JsonMapper::extract(std::string_view raw_payload,
                 break;
             }
 
-            simdjson::dom::object obj = current.get_object().value_unsafe();
+            auto obj_result = current.get_object();
+            if (obj_result.error()) {
+                found = false;
+                nav_error = std::string("Path segment '") + std::string(key) +
+                    "': failed to get object at '" + mapping.source + "'";
+                break;
+            }
+            simdjson::dom::object obj = obj_result.value();
             auto child_err = obj[key];
             if (child_err.error()) {
                 found = false;
@@ -291,7 +321,7 @@ JsonMapper::extract(std::string_view raw_payload,
                 break;
             }
 
-            simdjson::dom::element child = child_err.value_unsafe();
+            simdjson::dom::element child = child_err.value();
 
             if (is_last) {
                 // 到达目标：转为字符串存入结果
@@ -429,7 +459,13 @@ void JsonMapper::extractEmbeddedHeaders(std::string_view raw_payload,
     }
 
     for (auto field : headers_obj) {
-        std::string_view key_raw = field.unescaped_key().value_unsafe();
+        // 安全获取 key: 使用 value() 并检查错误，避免 value_unsafe() 的 UB 风险
+        auto key_result = field.unescaped_key();
+        if (key_result.error()) {
+            spdlog::warn("Embedded headers: failed to unescape key, skipping field");
+            continue;
+        }
+        std::string_view key_raw = key_result.value();
         std::string value = simdjsonValueToString(field.value());
 
         auto* header = is_request ? event.add_request_headers()
@@ -477,7 +513,13 @@ void JsonMapper::extractPrefixHeaders(std::string_view raw_payload,
 
     int count = 0;
     for (auto field : root_obj) {
-        std::string_view key_raw = field.unescaped_key().value_unsafe();
+        // 安全获取 key: 使用 value() 并检查错误
+        auto key_result = field.unescaped_key();
+        if (key_result.error()) {
+            spdlog::warn("Prefix headers: failed to unescape key, skipping field");
+            continue;
+        }
+        std::string_view key_raw = key_result.value();
 
         // 检查是否以 prefix 开头
         if (key_raw.size() <= prefix.size()) continue;

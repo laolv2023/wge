@@ -80,11 +80,19 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
 
     // 迭代所有顶层字段
     for (auto field : obj) {
-        std::string_view key = field.unescaped_key().value();
+        // 安全获取 key: 检查错误，避免 .value() 抛出异常
+        auto key_result = field.unescaped_key();
+        if (key_result.error()) {
+            // 跳过无法解析的 key
+            continue;
+        }
+        std::string_view key = key_result.value();
 
         if (!first) out << ",";
         first = false;
-        out << "\"" << key << "\":";
+        out << "\"";
+        escapeJsonStringTo(out, key);
+        out << "\":";
 
         // ── 特殊处理 1: requestHeaders — JSON 字符串 → 结构化数组 ──
         if (key == "requestHeaders" || key == "responseHeaders") {
@@ -231,7 +239,12 @@ AktoPreprocessor::expandHeaderJsonString(std::string_view header_json_str) {
     out << "[";
     bool first = true;
     for (auto field : header_obj) {
-        std::string_view key = field.unescaped_key().value();
+        // 安全获取 key: 检查错误
+        auto key_result = field.unescaped_key();
+        if (key_result.error()) {
+            continue;  // 跳过无法解析的 key
+        }
+        std::string_view key = key_result.value();
         std::string_view value;
 
         auto value_err = field.value().get_string().get(value);

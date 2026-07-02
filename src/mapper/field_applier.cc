@@ -130,6 +130,13 @@ void FieldApplier::setStringField(HttpAccessEvent& event,
         return;
     }
 
+    // 检查是否为 repeated 字段 — repeated 字段需要用 AddString 而非 SetString
+    if (fd->is_repeated()) {
+        spdlog::warn("Field '{}' is repeated, use AddString instead of SetString. "
+                     "Skipping scalar set.", field_name);
+        return;
+    }
+
     if (fd->type() != google::protobuf::FieldDescriptor::TYPE_STRING &&
         fd->type() != google::protobuf::FieldDescriptor::TYPE_BYTES) {
         spdlog::warn("Field '{}' is not a string type (actual: {})",
@@ -152,6 +159,12 @@ void FieldApplier::setInt32Field(HttpAccessEvent& event,
     if (!fd) {
         spdlog::warn("Field '{}' not found in HttpAccessEvent descriptor",
                      field_name);
+        return;
+    }
+
+    // 检查是否为 repeated 字段
+    if (fd->is_repeated()) {
+        spdlog::warn("Field '{}' is repeated, skipping scalar set.", field_name);
         return;
     }
 
@@ -199,6 +212,12 @@ void FieldApplier::setInt64Field(HttpAccessEvent& event,
     if (!fd) {
         spdlog::warn("Field '{}' not found in HttpAccessEvent descriptor",
                      field_name);
+        return;
+    }
+
+    // 检查是否为 repeated 字段
+    if (fd->is_repeated()) {
+        spdlog::warn("Field '{}' is repeated, skipping scalar set.", field_name);
         return;
     }
 

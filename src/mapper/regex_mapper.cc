@@ -161,6 +161,19 @@ RegexMapper::getOrCompile(const std::string& pattern) const {
         if (it != compile_cache_.end()) {
             return it->second;  // 其他线程已写入，返回其编译结果
         }
+        // 缓存大小限制: 防止无限增长导致 OOM
+        // 当缓存超过上限时，清空一半最旧的条目（简易 LRU 淘汰）
+        static constexpr size_t MAX_CACHE_SIZE = 10000;
+        if (compile_cache_.size() >= MAX_CACHE_SIZE) {
+            spdlog::warn("RegexMapper: compile cache full (size={}), evicting half",
+                         compile_cache_.size());
+            // std::map 按键排序，删除前一半（简易淘汰策略）
+            size_t to_remove = compile_cache_.size() / 2;
+            auto rm_it = compile_cache_.begin();
+            for (size_t i = 0; i < to_remove; ++i) {
+                rm_it = compile_cache_.erase(rm_it);
+            }
+        }
         compile_cache_[pattern] = re;  // 首次写入
     }
 
