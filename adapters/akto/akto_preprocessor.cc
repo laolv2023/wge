@@ -62,7 +62,8 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
             "AktoPreprocessor: failed to parse raw JSON: " +
             std::string(error_message(doc_result.error())));
     }
-    ondemand::document doc = doc_result.value_unsafe();
+    // 安全获取 document: 使用 value() 而非 value_unsafe()
+    ondemand::document doc = doc_result.value();
 
     // ── 步骤 2: 获取 JSON 对象 ──
     ondemand::object obj;
@@ -252,7 +253,8 @@ AktoPreprocessor::expandHeaderJsonString(std::string_view header_json_str) {
             "expandHeaderJsonString: failed to parse header JSON: " +
             std::string(error_message(doc_result.error())));
     }
-    ondemand::document doc = doc_result.value_unsafe();
+    // 安全获取 document: 使用 value() 而非 value_unsafe()
+    ondemand::document doc = doc_result.value();
 
     ondemand::object header_obj;
     auto obj_err = doc.get_object().get(header_obj);
