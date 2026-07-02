@@ -106,7 +106,9 @@ void WalWriter::write(const std::shared_ptr<WgeAlertEvent>& alert) {
     // 获取当前时间，用于按小时轮转 WAL 文件
     auto now = std::time(nullptr);
     std::tm tm_now;
-    ::localtime_r(&now, &tm_now);  // 线程安全版本的 localtime
+    // 使用 UTC 时间 (gmtime_r) 而非本地时间 (localtime_r)，
+    // 确保不同时区的服务器产生一致的 WAL 文件名
+    ::gmtime_r(&now, &tm_now);
 
     // 检查是否需要轮转到新的小时文件
     rotateIfNeeded(tm_now);
@@ -194,7 +196,9 @@ std::string WalWriter::currentWalFilePath(const std::tm* t) const {
         local_tm = *t;
     } else {
         auto now = std::time(nullptr);
-        ::localtime_r(&now, &local_tm);
+        // 使用 UTC 时间 (gmtime_r) 而非本地时间 (localtime_r)，
+        // 确保不同时区的服务器产生一致的 WAL 文件名
+        ::gmtime_r(&now, &local_tm);
     }
 
     std::strftime(buf, sizeof(buf), "alert-%Y%m%d-%H.log", &local_tm);
