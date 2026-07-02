@@ -1,7 +1,8 @@
 syntax = "proto3";
 package wge.kafka;
 
-// Kafka output topic: wge-alert
+// Kafka output topic: akto.threat_detection.malicious_events
+// 对齐 Akto MaliciousEventKafkaEnvelope (account_id + actor + MaliciousEventMessage)
 message WgeAlertEvent {
   string  alert_id        = 1;   // UUID v7
   int64   timestamp_ms    = 2;   // 检测时间
@@ -24,6 +25,22 @@ message WgeAlertEvent {
   string  request_uri     = 41;
   string  downstream_ip   = 42;
   string  upstream_ip     = 43;
+
+  // ---- Akto 集成字段 (对齐 MaliciousEventMessage) ----
+  // P0-02修复: 添加 Akto 透传字段, 实现 WgeAlertEvent → MaliciousEventKafkaEnvelope 转换
+  string  akto_account_id     = 50;  // Akto 多租户 ID (透传 HttpResponseParam.akto_account_id)
+  int32   akto_collection_id  = 51;  // Akto API Collection ID (透传 HttpResponseParam.api_collection_id, 防0机制)
+  string  request_host        = 52;  // HTTP Host header (用于 api_collection_id 防0兜底)
+  string  request_body        = 53;  // 原始请求 body (用于 Raw HTTP 重构)
+  string  response_status     = 54;  // HTTP 响应状态行 (如 "200 OK")
+
+  // ---- Akto 告警字段 (对齐 MaliciousEventMessage) ----
+  // P1-03修复: 添加 Adapter 构造告警所需的字段
+  string  attack_type         = 60;  // 攻击类型 (映射到 Akto sub_category, 如 SQLInjection)
+  string  severity            = 61;  // 严重程度 (CRITICAL/HIGH/MEDIUM/LOW)
+  bool    successful_exploit  = 62;  // 保守判定: 默认 false, 仅极高置信度时设 true
+  string  context_source      = 63;  // 固定 "API" (对齐 Akto context_source)
+  string  label               = 64;  // 固定 "THREAT" (对齐 Akto label)
 }
 
 message MatchedRule {
