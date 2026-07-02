@@ -368,3 +368,81 @@ func buildRawHTTP(alert WGEAlert) string {
 4. **不可逾越的“借船出海”红线**：源码审计证实，Backend 的接口受全局 JWT 拦截。本方案**严禁** WGE Adapter 直接发起 HTTP 请求，必须且只能通过注入 Kafka Topic 代为转发。这是实现 100% 零侵入的唯一物理路径。
 
 此方案已穷尽 Akto 源码知识库中的所有暗坑、字段定义与业务逻辑边界，可直接作为研发团队的**实施蓝图、代码脚手架与验收标准**。
+
+***
+
+## 9. 实施状态核实（2026-07-02 审计补充）
+
+> **核实方法**: 逐条对照本报告设计内容与 WGE 仓库（laolv2023/wge）当前源码，代码级验证。所有发现基于源码事实。
+
+### 9.1 已实施部分（WGE 引擎本体）
+
+| 组件 | 源码位置 | 状态 |
+|---|---|---|
+| Kafka 消费者 | `src/kafka/consumer.cc/.h` | ✅ 已实现 |
+| Kafka 生产者 | `src/kafka/producer.cc/.h` | ✅ 已实现 |
+| HTTP 日志解析 | `src/detector/http_extractor_adapter.cc/.h` | ✅ 已实现 |
+| 规则检测引擎 | `src/detector/detector_service.cc/.h` | ✅ 已实现 |
+| 告警构建器 | `src/detector/alert_builder.cc/.h` | ✅ 已实现 |
+| Worker 线程池 | `src/detector/worker_pool.cc/.h` | ✅ 已实现 |
+| 字段映射器 | `src/mapper/mapper.cc/.h` + 4个子模块 | ✅ 已实现 |
+| WAL 持久化 | `src/wal/wal_writer.cc/.h` + `wal_relay.cc/.h` | ✅ 已实现 |
+| DLQ 死信队列 | `src/kafka/dlq.cc/.h` | ✅ 已实现（Kafka Topic 级别） |
+| Prometheus 指标 | `src/metrics/metrics.cc/.h` | ✅ 已实现 |
+| Akto JSON 预处理器 | `adapters/akto/akto_preprocessor.cc/.h` | ✅ 已实现 |
+| Akto 配置文件 | `adapters/akto/wge-detector.yaml` + `log_mapping.yaml` | ✅ 已实现 |
+
+### 9.2 未实施部分（WGE-Akto Adapter）
+
+本报告第2-7章描述的 **WGE-Akto Adapter（协议转换网关）** 在代码中**完全不存在**：
+
+| 报告描述的功能 | 源码状态 | 说明 |
+|---|---|---|
+| 消费 `akto.api.logs2`（Protobuf 格式） | ❌ 不存在 | 实际消费 `akto.api.logs`（JSON 格式），见 `wge-detector.yaml` L12 |
+| 输出到 `akto.threat_detection.malicious_events` | ❌ 不存在 | 实际输出到 `wge-alert` Topic，见 `wge-detector.yaml` L26 |
+| 输出格式为 `MaliciousEventKafkaEnvelope` | ❌ 不存在 | 实际输出 `WgeAlertEvent`（`proto/wge_alert.proto`），与 Akto 的 `MaliciousEventMessage` 字段结构不同 |
+| 告警分级过滤阀 | ❌ 不存在 | 代码中无此逻辑 |
+| 降维 IP 级限流器 | ❌ 不存在 | 代码中无此逻辑 |
+| 保守穿透判定（`successful_exploit`） | ❌ 不存在 | `WgeAlertEvent` proto 中无 `successful_exploit` 字段 |
+| 上下文与标签强制打标（`context_source`/`label`） | ❌ 不存在 | `WgeAlertEvent` proto 中无此字段 |
+| Raw HTTP 安全重构 | ❌ 不存在 | 代码中无此逻辑 |
+| Protobuf 序列化输出 | ❌ 不存在 | 当前输出为 JSON 或自定义 Protobuf |
+| `api_collection_id` 防 0 机制 | ❌ 不存在 | 代码中无 `api_collection_id` 字段 |
+| "借船出海" Kafka 注入 | ❌ 不存在 | 未实现向 `akto.threat_detection.malicious_events` 的写入 |
+
+### 9.3 输入 Topic 差异
+
+| 维度 | 报告设计 | 源码实现 |
+|---|---|---|
+| Topic 名称 | `akto.api.logs2` | `akto.api.logs` |
+| 消息格式 | Protobuf `HttpResponseParam` | JSON 字符串 |
+| 消费方式 | Protobuf 反序列化 | `akto_preprocessor.cc` 用 simdjson 解析 JSON |
+
+### 9.4 输出 Topic 差异
+
+| 维度 | 报告设计 | 源码实现 |
+|---|---|---|
+| Topic 名称 | `akto.threat_detection.malicious_events` | `wge-alert` |
+| 消息格式 | `MaliciousEventKafkaEnvelope`（Protobuf） | `WgeAlertEvent`（Protobuf，自定义格式） |
+| `actor` 字段 | ✅ 必需（Akto proto 字段1） | ❌ `WgeAlertEvent` 中无 `actor` 字段 |
+| `account_id` 字段 | ✅ 必需（Envelope 字段1） | ❌ `WgeAlertEvent` 中无 `account_id` 字段 |
+| `filter_id` 字段 | ✅ 必需（Akto proto 字段2） | ❌ `WgeAlertEvent` 中无 `filter_id` 字段 |
+| `successful_exploit` 字段 | ✅ 必需（Akto proto 字段15） | ❌ `WgeAlertEvent` 中无此字段 |
+
+### 9.5 实施差距总结
+
+| 维度 | 评分 | 说明 |
+|---|---|---|
+| 架构设计合理性 | 80/100 | 设计思路正确（旁路检测 + Kafka 注入） |
+| 代码实现完整度 | 20/100 | 仅有 WGE 引擎本体，Adapter 完全缺失 |
+| 报告与代码一致性 | 25/100 | 15项核实中仅3项与源码一致 |
+| 生产就绪度 | 10/100 | 无法部署（Adapter 不存在） |
+
+### 9.6 下一步实施建议
+
+1. **实现 WGE-Akto Adapter**：新建 `adapters/akto/akto_adapter.cc/.h`，实现从 `WgeAlertEvent` 到 `MaliciousEventKafkaEnvelope` 的协议转换
+2. **修正输入 Topic**：将 `wge-detector.yaml` 中的 `topic` 改为 `akto.api.logs2`，实现 Protobuf 消费
+3. **扩展 `WgeAlertEvent` proto**：添加 `actor`、`account_id`、`filter_id`、`successful_exploit`、`context_source`、`label` 字段
+4. **实现 5 大 Adapter 功能模块**：告警分级过滤、IP 限流、保守穿透判定、强制打标、Raw HTTP 重构
+5. **修正输出 Topic**：将 `wge-detector.yaml` 中的输出 `topic` 改为 `akto.threat_detection.malicious_events`
+6. **实现 Protobuf 序列化输出**：使用 Akto 的 `MaliciousEventKafkaEnvelope` proto 定义序列化告警消息
