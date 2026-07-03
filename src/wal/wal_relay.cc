@@ -385,7 +385,7 @@ int64_t WalRelay::processWalFile(const std::string& file_path) {
         SPDLOG_INFO("WalRelay: {} of {} alerts relayed from '{}', "
                     "remaining {} kept in file",
                     relayed, lines.size(), file_path,
-                    lines.size() - relayed);
+                    static_cast<int64_t>(lines.size()) - relayed);
     }
 
     return relayed;
