@@ -184,6 +184,11 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
                         wal_dir_, std::strerror(errno));
             continue;  // 目录打开失败，等待下次扫描重试
         }
+        // RAII: 确保 DIR* 在任何情况下（包括异常）都被关闭
+        struct DirDeleter {
+            void operator()(DIR* d) const { if (d) ::closedir(d); }
+        };
+        std::unique_ptr<DIR, DirDeleter> dir_guard(dir);
 
         int64_t total_relayed = 0;
         int64_t files_processed = 0;
@@ -239,8 +244,7 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
                              file_path, e.what());
             }
         }
-
-        ::closedir(dir);
+        // dir_guard 析构时自动调用 ::closedir(dir)，无需手动关闭
 
         if (total_relayed > 0) {
             SPDLOG_INFO("WalRelay: scan complete — relayed {} alerts from {} files",
