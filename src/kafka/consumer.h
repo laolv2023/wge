@@ -63,6 +63,18 @@ struct ConsumerConfig {
     /// @brief 会话超时时间 (ms)
     int64_t session_timeout_ms{30'000};
 
+    /// @brief 心跳间隔 (ms)，通常为 session_timeout 的 1/3
+    int64_t heartbeat_interval_ms{3'000};
+
+    /// @brief 两次 poll 之间最大间隔 (ms)，超时则消费者被踢出组
+    int64_t max_poll_interval_ms{300'000};
+
+    /// @brief auto.offset.reset: earliest | latest | none | error
+    std::string auto_offset_reset{"latest"};
+
+    /// @brief 分区分配策略: range | roundrobin | cooperative-sticky | ...
+    std::string partition_assignment_strategy{"cooperative-sticky"};
+
     /// @brief 是否启用自动提交 offset
     bool enable_auto_commit{false};
 

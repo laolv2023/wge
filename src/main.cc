@@ -276,6 +276,10 @@ wge::kafka::ConsumerConfig bridgeConsumerConfig(
     out.max_poll_records = cfg.max_poll_records;
     out.poll_interval_ms = poll_interval_ms;  // 从 detector 配置传入，而非 YAML
     out.session_timeout_ms = cfg.session_timeout_ms;
+    out.heartbeat_interval_ms = cfg.heartbeat_interval_ms;
+    out.max_poll_interval_ms = cfg.max_poll_interval_ms;
+    out.auto_offset_reset = cfg.auto_offset_reset;
+    out.partition_assignment_strategy = cfg.partition_assignment_strategy;
     out.enable_auto_commit = cfg.enable_auto_commit;
     out.security_protocol = cfg.security_protocol;
     out.sasl_mechanism = cfg.sasl_mechanism;
@@ -303,7 +307,10 @@ wge::kafka::ProducerConfig bridgeProducerConfig(
     out.batch_size = batch_size_override;  // 从 detector 配置覆盖
     out.linger_ms = static_cast<int32_t>(cfg.linger_ms);  // double → int32
     out.retries = cfg.retries;
-    out.enable_idempotence = true;  // 默认启用幂等性
+    out.enable_idempotence = cfg.enable_idempotence;
+    out.transactional_id = cfg.transactional_id;
+    out.max_in_flight_requests_per_connection =
+        cfg.max_in_flight_requests_per_connection;
     out.security_protocol = cfg.security_protocol;
     out.sasl_mechanism = cfg.sasl_mechanism;
     out.sasl_username = cfg.sasl_username;

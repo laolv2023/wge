@@ -64,6 +64,10 @@ struct ConsumerConfig {
     /// @brief 分区 fetch 最大字节数
     int32_t fetch_max_bytes{50 * 1024 * 1024};  // 50 MB
 
+    /// @brief 分区分配策略: "range" | "roundrobin" | "cooperative-sticky" 等
+    /// 传递给 rdkafka 的 partition.assignment.strategy 属性
+    std::string partition_assignment_strategy{"cooperative-sticky"};
+
     /// @brief 安全协议: "plaintext" | "ssl" | "sasl_plaintext" | "sasl_ssl"
     std::string security_protocol{"plaintext"};
 
@@ -119,6 +123,17 @@ struct ProducerConfig {
 
     /// @brief 重试间隔 (ms)
     int32_t retry_backoff_ms{100};
+
+    /// @brief 是否启用幂等生产者（防止消息重复）
+    /// 启用后 rdkafka 自动设置 enable.idempotence=true，要求 acks=all
+    bool enable_idempotence{true};
+
+    /// @brief 事务 ID（非空时启用 Exactly-Once Semantics 事务模式）
+    /// 事务模式下生产者可跨分区原子写入，配合消费者 read_committed 隔离级别
+    std::string transactional_id{};
+
+    /// @brief 每个连接的最大在途请求数（幂等模式下建议 ≤ 5）
+    int32_t max_in_flight_requests_per_connection{5};
 
     /// @brief 安全协议: "plaintext" | "ssl" | "sasl_plaintext" | "sasl_ssl"
     std::string security_protocol{"plaintext"};

@@ -28,6 +28,7 @@
 #include "kafka/producer.h"
 
 #include <chrono>
+#include <algorithm>
 #include <sstream>
 #include <stdexcept>
 
@@ -117,7 +118,12 @@ AlertProducer::AlertProducer(const ProducerConfig& config)
         // 幂等生产者要求 acks=all（等待所有 ISR 确认）
         setConfOrThrow(conf_.get(), "acks", "all");
         // 幂等生产者要求 max.in.flight <= 5（保证消息顺序）
-        setConfOrThrow(conf_.get(), "max.in.flight.requests.per.connection", "5");
+        // 使用配置值，但限制上限为 5 以满足 rdkafka 幂等约束
+        int32_t inflight = std::min(
+            config_.max_in_flight_requests_per_connection,
+            static_cast<int32_t>(5));
+        setConfOrThrow(conf_.get(), "max.in.flight.requests.per.connection",
+                       std::to_string(inflight));
     }
 
     // ---- 事务 ID ----

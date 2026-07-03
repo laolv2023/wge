@@ -109,16 +109,21 @@ KafkaConsumer::KafkaConsumer(const ConsumerConfig& config)
     setConfOrThrow(global_conf_.get(), "group.id", config_.group_id);
     setConfOrThrow(global_conf_.get(), "session.timeout.ms",
                    config_.session_timeout_ms);
-    setConfOrThrow(global_conf_.get(), "enable.auto.commit",
-                   config_.enable_auto_commit ? "true" : "false");
-    // max.poll.interval.ms: 设置为 session_timeout * 3，
-    // 给下游处理留足时间，防止因处理慢被踢出 group
-    // 溢出保护: session_timeout_ms * 3 可能溢出 int32_t
-    int64_t max_poll_interval = static_cast<int64_t>(config_.session_timeout_ms) * 3;
+    // 心跳间隔，通常为 session_timeout 的 1/3
+    setConfOrThrow(global_conf_.get(), "heartbeat.interval.ms",
+                   config_.heartbeat_interval_ms);
+    // max.poll.interval.ms: 两次 poll 之间最大间隔，超时则消费者被踢出组
+    // 溢出保护: 配置值可能超过 INT32_MAX
+    int64_t max_poll_interval = config_.max_poll_interval_ms;
     if (max_poll_interval > INT32_MAX) max_poll_interval = INT32_MAX;
     if (max_poll_interval < 1) max_poll_interval = 1;
     setConfOrThrow(global_conf_.get(), "max.poll.interval.ms",
                    std::to_string(max_poll_interval));
+    // 分区分配策略（cooperative-sticky 支持平滑 rebalance）
+    setConfOrThrow(global_conf_.get(), "partition.assignment.strategy",
+                   config_.partition_assignment_strategy);
+    setConfOrThrow(global_conf_.get(), "enable.auto.commit",
+                   config_.enable_auto_commit ? "true" : "false");
 
     // 安全协议（SASL/SSL）
     applySaslConfig(global_conf_.get());
@@ -127,7 +132,8 @@ KafkaConsumer::KafkaConsumer(const ConsumerConfig& config)
     setConfOrThrow(global_conf_.get(), "log_level", "6");  // LOG_INFO
 
     // ---- Topic 配置 ----
-    setConfOrThrow(topic_conf_.get(), "auto.offset.reset", "latest");
+    setConfOrThrow(topic_conf_.get(), "auto.offset.reset",
+                   config_.auto_offset_reset);
 
     // ---- 创建 Consumer ----
     std::string err_str;

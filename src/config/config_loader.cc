@@ -96,6 +96,37 @@ std::optional<std::vector<std::string>> getOptionalStringList(
 }
 
 /**
+ * @brief 从 YAML 节点读取 Kafka acks 配置
+ *
+ * Kafka 的 acks 配置既可以是整数 (0, 1, -1) 也可以是字符串 ("all")。
+ * yaml-cpp 的 as<int32_t>() 在遇到字符串 "all" 时会抛出 BadConversion 异常，
+ * 导致整个配置文件加载失败。此函数安全地处理两种形式：
+ *   - "all" 或 "-1" → -1 (全 ISR 副本确认)
+ *   - "0"           → 0  (无需确认)
+ *   - "1"           → 1  (仅 leader 确认)
+ *
+ * @return std::optional<int32_t> 解析后的 acks 值，缺失或节点不存在时返回 nullopt
+ */
+std::optional<int32_t> getOptionalAcks(const YAML::Node& node,
+                                       const std::string& key) {
+    if (!node || !node[key] || node[key].IsNull()) return std::nullopt;
+    const YAML::Node& n = node[key];
+    // 优先尝试整数解析（适用于 0, 1, -1 等纯数字形式）
+    try {
+        return n.as<int32_t>();
+    } catch (const YAML::BadConversion&) {
+        // 非整数，尝试字符串形式
+    }
+    std::string s = n.as<std::string>();
+    if (s == "all" || s == "-1") return -1;
+    if (s == "0") return 0;
+    if (s == "1") return 1;
+    throw YAML::RepresentationException(
+        n.Mark(), "Invalid acks value: '" + s +
+                      "' (expected 0, 1, -1, or \"all\")");
+}
+
+/**
  * @brief 设置字符串字段（若 optional 有值）
  */
 void setIfPresent(std::string& field,
@@ -169,6 +200,8 @@ void parseConsumer(ConsumerConfig& cfg, const YAML::Node& node) {
                  getOptionalInt32(node, "fetch_min_bytes"));
     setIfPresent(cfg.fetch_max_bytes,
                  getOptionalInt32(node, "fetch_max_bytes"));
+    setIfPresent(cfg.partition_assignment_strategy,
+                 getOptionalString(node, "partition_assignment_strategy"));
     setIfPresent(cfg.security_protocol,
                  getOptionalString(node, "security_protocol"));
     setIfPresent(cfg.sasl_mechanism,
@@ -187,7 +220,7 @@ void parseProducer(ProducerConfig& cfg, const YAML::Node& node) {
                  getOptionalString(node, "bootstrap_servers"));
     setIfPresent(cfg.topic, getOptionalString(node, "topic"));
     setIfPresent(cfg.dlq_topic, getOptionalString(node, "dlq_topic"));
-    setIfPresent(cfg.acks, getOptionalInt32(node, "acks"));
+    setIfPresent(cfg.acks, getOptionalAcks(node, "acks"));
     setIfPresent(cfg.compression_type,
                  getOptionalString(node, "compression_type"));
     setIfPresent(cfg.linger_ms, getOptionalDouble(node, "linger_ms"));
@@ -197,6 +230,12 @@ void parseProducer(ProducerConfig& cfg, const YAML::Node& node) {
     setIfPresent(cfg.retries, getOptionalInt32(node, "retries"));
     setIfPresent(cfg.retry_backoff_ms,
                  getOptionalInt32(node, "retry_backoff_ms"));
+    setIfPresent(cfg.enable_idempotence,
+                 getOptionalBool(node, "enable_idempotence"));
+    setIfPresent(cfg.transactional_id,
+                 getOptionalString(node, "transactional_id"));
+    setIfPresent(cfg.max_in_flight_requests_per_connection,
+                 getOptionalInt32(node, "max_in_flight_requests_per_connection"));
     setIfPresent(cfg.security_protocol,
                  getOptionalString(node, "security_protocol"));
     setIfPresent(cfg.sasl_mechanism,
@@ -264,17 +303,62 @@ void parseDetector(DetectorConfig& cfg, const YAML::Node& node) {
 
 /**
  * @brief 解析 ObservabilityConfig
+ *
+ * 支持两种 YAML 结构：
+ *
+ * 1. 嵌套结构（推荐，与 wge-detector.yaml 一致）：
+ *    observability:
+ *      prometheus:
+ *        enabled: true
+ *        port: 9101
+ *        path: "/metrics"
+ *      opentelemetry:
+ *        enabled: false
+ *        endpoint: "..."
+ *      log_level: "info"
+ *      log_format: "json"
+ *
+ * 2. 扁平结构（向后兼容）：
+ *    observability:
+ *      prometheus_enabled: true
+ *      prometheus_port: 9101
+ *      ...
+ *
+ * 嵌套键优先；若嵌套键不存在则回退到扁平键。
  */
 void parseObservability(ObservabilityConfig& cfg, const YAML::Node& node) {
-    setIfPresent(cfg.prometheus_enabled,
-                 getOptionalBool(node, "prometheus_enabled"));
-    setIfPresent(cfg.prometheus_port,
-                 getOptionalInt32(node, "prometheus_port"));
-    setIfPresent(cfg.prometheus_path,
-                 getOptionalString(node, "prometheus_path"));
-    setIfPresent(cfg.otel_enabled, getOptionalBool(node, "otel_enabled"));
-    setIfPresent(cfg.otel_endpoint,
-                 getOptionalString(node, "otel_endpoint"));
+    // --- Prometheus: 嵌套 prometheus.* 优先，回退到扁平 prometheus_* ---
+    YAML::Node prom_node = node["prometheus"];
+    {
+        auto v = getOptionalBool(prom_node, "enabled");
+        if (!v) v = getOptionalBool(node, "prometheus_enabled");
+        setIfPresent(cfg.prometheus_enabled, v);
+    }
+    {
+        auto v = getOptionalInt32(prom_node, "port");
+        if (!v) v = getOptionalInt32(node, "prometheus_port");
+        setIfPresent(cfg.prometheus_port, v);
+    }
+    {
+        auto v = getOptionalString(prom_node, "path");
+        if (!v) v = getOptionalString(node, "prometheus_path");
+        setIfPresent(cfg.prometheus_path, v);
+    }
+
+    // --- OpenTelemetry: 嵌套 opentelemetry.* 优先，回退到扁平 otel_* ---
+    YAML::Node otel_node = node["opentelemetry"];
+    {
+        auto v = getOptionalBool(otel_node, "enabled");
+        if (!v) v = getOptionalBool(node, "otel_enabled");
+        setIfPresent(cfg.otel_enabled, v);
+    }
+    {
+        auto v = getOptionalString(otel_node, "endpoint");
+        if (!v) v = getOptionalString(node, "otel_endpoint");
+        setIfPresent(cfg.otel_endpoint, v);
+    }
+
+    // --- 日志: 顶层扁平键 ---
     setIfPresent(cfg.log_level, getOptionalString(node, "log_level"));
     setIfPresent(cfg.log_format, getOptionalString(node, "log_format"));
     setIfPresent(cfg.log_file_path,

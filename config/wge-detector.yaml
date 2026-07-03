@@ -16,6 +16,7 @@ kafka:
     auto_offset_reset: "latest"             # earliest | latest (生产默认 latest, 避免重启回放)
     enable_auto_commit: false               # 手动提交，确保 exactly-once
     session_timeout_ms: 30000
+    heartbeat_interval_ms: 10000            # 心跳间隔 (≈ session_timeout 的 1/3)
     max_poll_records: 500                   # 单次 poll 最大记录数
     max_poll_interval_ms: 300000
     fetch_max_bytes: 2097152                # 2MB per fetch (API 日志 body 可能较大)
@@ -79,6 +80,8 @@ detector:
 
 # ===== 可观测性 =====
 observability:
+  log_level: "info"                         # trace|debug|info|warn|error|critical|off
+  log_format: "json"                        # json | text
   prometheus:
     enabled: true
     port: 9101

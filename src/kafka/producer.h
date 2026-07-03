@@ -64,6 +64,9 @@ struct ProducerConfig {
     /// @brief 是否启用幂等生产者
     bool enable_idempotence{true};
 
+    /// @brief 每个连接的最大在途请求数（幂等模式下建议 ≤ 5）
+    int32_t max_in_flight_requests_per_connection{5};
+
     /// @brief 消息发送重试次数
     int32_t retries{3};
 
