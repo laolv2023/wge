@@ -16,6 +16,8 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -37,6 +39,10 @@ struct AppConfig;
 
 namespace mapper {
 class LogMapper;
+}
+
+namespace adapter {
+class AktoPreprocessor;
 }
 
 namespace detector {
@@ -169,6 +175,9 @@ private:
     mapper::LogMapper& mapper_;
     WgeWorkerPool& pool_;
     metrics::Metrics& metrics_;
+
+    /// @brief 可选的 Akto 预处理器 (当 config_.mapping.preprocessor == "akto" 时启用)
+    std::unique_ptr<adapter::AktoPreprocessor> akto_preprocessor_;
 
     // ---- 状态 ----
     std::atomic<bool> running_{false};

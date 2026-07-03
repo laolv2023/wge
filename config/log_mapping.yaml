@@ -1,206 +1,109 @@
-# log_mapping.yaml — 原始日志 → HttpAccessEvent 映射配置
+# log_mapping.yaml — Akto API 日志 → HttpAccessEvent 映射配置
+# 适配对象: Akto API Security 平台的 Kafka 输出
+# 输入 Topic: akto.api.logs (JSON) 或 akto.api.logs2 (Protobuf → JSON)
+# 特殊处理: requestHeaders/responseHeaders 为 JSON 字符串, 需 AktoPreprocessor 二次解析
 
 # ===== 全局设置 =====
 mapping:
-  # 输入格式: protobuf | json | regex | grok
   format: "json"
-
-  # 原始消息编码: utf8 | base64 | hex
   encoding: "utf8"
-
-  # 当原始日志无法解析时的处理: skip | dlq
   on_parse_error: "dlq"
-
-  # event_id 生成策略:
-  #   auto    — 自动生成 UUID v7
-  #   extract — 从原始日志中提取
   event_id_policy: "auto"
-
-  # timestamp 生成策略:
-  #   auto    — 使用消费时间
-  #   extract — 从原始日志中提取 (需指定格式)
   timestamp_policy: "extract"
 
-# ===== JSON 格式映射 =====
+# ===== JSON 格式映射 (Akto 日志字段 → WGE Protobuf 字段) =====
 json:
-  # 字段映射: source 为原始 JSON 中的路径 (支持点号分隔的嵌套路径)
-  #           target 为 HttpAccessEvent Protobuf 字段名
-  #           type 为目标类型: string | int32 | int64 | bytes | bool
-  #           default 为缺失时的默认值 (可选)
   fields:
-    - source: "request.method"
-      target: "request_method"
-      type: "string"
-      default: "GET"
-
-    - source: "request.uri"
+    # 请求信息
+    - source: "path"
       target: "request_uri"
       type: "string"
       default: "/"
 
-    - source: "request.version"
+    - source: "method"
+      target: "request_method"
+      type: "string"
+      default: "GET"
+
+    - source: "type"
       target: "request_version"
       type: "string"
       default: "1.1"
+      # 前置处理: akto_preprocessor 会将 "HTTP/1.1" → "1.1"
 
-    - source: "request.body"
+    # 请求体
+    - source: "requestPayload"
       target: "request_body"
-      type: "bytes"            # base64 字符串自动解码为 bytes
+      type: "bytes"
 
-    - source: "request.body.length"
+    - source: "requestPayload.length"
       target: "request_body_length"
       type: "int64"
       default: 0
 
-    - source: "response.status"
+    # 响应状态码 (Akto 中是 string, 需转为 int32)
+    - source: "statusCode"
       target: "response_status"
       type: "int32"
       default: 0
 
-    - source: "response.version"
-      target: "response_version"
-      type: "string"
-      default: "1.1"
-
-    - source: "response.body"
+    # 响应体
+    - source: "responsePayload"
       target: "response_body"
       type: "bytes"
 
-    - source: "response.body.length"
+    - source: "responsePayload.length"
       target: "response_body_length"
       type: "int64"
       default: 0
 
-    - source: "connection.source_ip"
+    # IP 地址
+    - source: "ipSrc"
       target: "downstream_ip"
       type: "string"
       default: "0.0.0.0"
 
-    - source: "connection.source_port"
-      target: "downstream_port"
-      type: "int32"
-      default: 0
-
-    - source: "connection.dest_ip"
+    - source: "ipDest"
       target: "upstream_ip"
       type: "string"
       default: "0.0.0.0"
 
-    - source: "connection.dest_port"
-      target: "upstream_port"
-      type: "int32"
-      default: 0
-
-    - source: "timestamp"
+    # 时间戳 (Akto 使用秒级 epoch, preprocessor 会 ×1000 转为毫秒)
+    - source: "time"
       target: "timestamp_ms"
       type: "int64"
 
-    - source: "collector"
+    # 采集源标识
+    - source: "akto_account_id"
       target: "collector_id"
       type: "string"
-      default: "unknown"
+      default: "akto-unknown"
 
-  # Header 提取: 从原始 JSON 中提取 HTTP Headers
-  # 模式: embedded (headers 已是 key-value 数组) | prefix (headers 共享前缀)
+  # Header 提取: 使用 embedded 模式
+  # akto_preprocessor 会先将 JSON 字符串的 headers 展开为结构化数组
+  # 展开后的格式: [{"key":"Accept","value":"application/json"}, ...]
   header_mode: "embedded"
 
   headers:
-    # embedded 模式: 原始 JSON 中 headers 已是结构化数组
     request:
-      source: "request.headers"        # JSON 路径, 值为 [{"key":"Content-Type","value":"text/html"}, ...]
+      source: "requestHeaders"
       key_field: "key"
       value_field: "value"
     response:
-      source: "response.headers"
+      source: "responseHeaders"
       key_field: "key"
       value_field: "value"
 
-  # prefix 模式 (备选): headers 散落在字段前缀下
-  #   request_prefix: "request.header."
-  #   response_prefix: "response.header."
-
-# ===== Regex 格式映射 (Nginx combined log 示例) =====
-# 当 mapping.format 设为 "regex" 时使用此段
-regex:
-  # 正则表达式, 命名分组对应 HttpAccessEvent 字段
-  # 注意: request_version 捕获的是 "HTTP/1.1" 格式, 映射时需 strip "HTTP/" 前缀
-  pattern: '^(?P<downstream_ip>\S+) \S+ \S+ \[(?P<timestamp>[^\]]+)\] "(?P<request_method>\S+) (?P<request_uri>\S+) (?P<request_version>[^"]+)" (?P<response_status>\d+) (?P<response_body_length>\d+) "(?P<referer>[^"]*)" "(?P<user_agent>[^"]*)"'
-
-  # 分组名 → Protobuf 字段映射 (仅列出需要映射的)
-  fields:
-    - source: "downstream_ip"
-      target: "downstream_ip"
-      type: "string"
-
-    - source: "request_method"
-      target: "request_method"
-      type: "string"
-
-    - source: "request_uri"
-      target: "request_uri"
-      type: "string"
-
-    - source: "request_version"
-      target: "request_version"
-      type: "string"
-
-    - source: "response_status"
-      target: "response_status"
-      type: "int32"
-
-    - source: "response_body_length"
-      target: "response_body_length"
-      type: "int64"
-
-    - source: "user_agent"
-      target: "request_headers"
-      type: "header"            # 特殊类型: 自动包装为 Header{"User-Agent", value}
-
-  # timestamp 解析格式
-  timestamp_format: "%d/%b/%Y:%H:%M:%S %z"
-
-  # Regex 模式下 Header 的特殊映射规则
-  header_mappings:
-    - source: "user_agent"
-      header_name: "User-Agent"
-      direction: "request"      # request | response
-    - source: "referer"
-      header_name: "Referer"
-      direction: "request"
-
-# ===== Grok 格式映射 (兼容 Logstash) =====
-# 当 mapping.format 设为 "grok" 时使用此段
-grok:
-  # Grok pattern (使用 %{PATTERN:name} 语法)
-  pattern: '%{IP:downstream_ip} %{WORD:ident} %{USER:auth} \[%{HTTPDATE:timestamp}\] "%{WORD:request_method} %{URIPATHPARAM:request_uri} HTTP/%{NUMBER:request_version}" %{INT:response_status} %{INT:response_body_length}'
-
-  # 内置 Grok pattern 定义 (可扩展)
-  patterns_dir: "/etc/wge/grok_patterns/"
-
-  fields:
-    - source: "downstream_ip"
-      target: "downstream_ip"
-      type: "string"
-    # ... 同 regex 的 fields 格式
-
-  timestamp_format: "%d/%b/%Y:%H:%M:%S %z"
-
 # ===== 类型转换规则 =====
 conversions:
-  # timestamp 字符串 → epoch ms 的格式定义
   timestamp_formats:
-    - "%Y-%m-%dT%H:%M:%S%.3fZ"        # ISO 8601 (e.g., 2026-05-27T10:30:00.000Z)
-    - "%d/%b/%Y:%H:%M:%S %z"          # Nginx (e.g., 27/May/2026:10:30:00 +0800)
-    - "%Y-%m-%d %H:%M:%S"             # 简单格式
-    - "%s"                             # Unix epoch seconds
-    - "%s%3N"                          # Unix epoch milliseconds
+    - "%s"                             # Unix epoch seconds (Akto 格式)
 
-  # bytes 字段的编码来源: base64 | hex | raw
   bytes_encoding:
-    request_body: "base64"            # JSON 中 body 通常是 base64 编码
-    response_body: "base64"
+    request_body: "raw"
+    response_body: "raw"
 
-# ===== 常量注入 (每条事件都附加的固定值) =====
+# ===== 常量注入 =====
 constants:
-  collector_id: "nginx-prod-01"        # 可被字段映射覆盖
-  downstream_port: 443                 # 如果原始日志不含端口号
+  downstream_port: 0
+  upstream_port: 0

@@ -19,6 +19,14 @@
 #include "metrics/metrics.h"
 #include "spdlog/spdlog.h"
 
+// Akto 预处理器 (条件包含，仅在启用 akto 预处理时需要)
+#if __has_include("akto/akto_preprocessor.h")
+#include "akto/akto_preprocessor.h"
+#define WGE_HAS_AKTO_PREPROCESSOR 1
+#else
+#define WGE_HAS_AKTO_PREPROCESSOR 0
+#endif
+
 namespace wge::kafka::detector {
 
 // ============================================================================
@@ -40,8 +48,21 @@ DetectorService::DetectorService(const config::AppConfig& config,
     , pool_(pool)
     , metrics_(metrics) {
 
-    SPDLOG_INFO("DetectorService created: instance={}, version={}",
-                config_.instance_name, config_.app_version);
+    // 根据配置初始化预处理器
+    if (config_.mapping.preprocessor == "akto") {
+#if WGE_HAS_AKTO_PREPROCESSOR
+        akto_preprocessor_ = std::make_unique<adapter::AktoPreprocessor>();
+        SPDLOG_INFO("DetectorService: AktoPreprocessor enabled "
+                    "(preprocessing Akto JSON logs before mapping)");
+#else
+        SPDLOG_WARN("DetectorService: 'akto' preprocessor requested but "
+                    "akto_preprocessor.h not available, falling back to direct mapping");
+#endif
+    }
+
+    SPDLOG_INFO("DetectorService created: instance={}, version={}, preprocessor={}",
+                config_.instance_name, config_.app_version,
+                config_.mapping.preprocessor.empty() ? "none" : config_.mapping.preprocessor.c_str());
 }
 
 DetectorService::~DetectorService() {
@@ -225,8 +246,35 @@ void DetectorService::onConsumerBatch(
 
         std::string_view raw_payload(payload, payload_len);
 
+        // ===== 预处理阶段 =====
+        // 当启用 Akto 预处理器时，先将 Akto 原始 JSON 日志预处理为标准格式:
+        //   1. 展开 JSON 字符串格式的 requestHeaders/responseHeaders
+        //   2. 秒级时间戳 → 毫秒级
+        //   3. HTTP 版本号 "HTTP/1.1" → "1.1"
+        std::string preprocessed_payload;
+        std::string_view map_input = raw_payload;
+
+        if (akto_preprocessor_) {
+            auto pp_result = akto_preprocessor_->preprocess(raw_payload);
+            if (pp_result) {
+                preprocessed_payload = std::move(*pp_result);
+                map_input = preprocessed_payload;
+            } else {
+                // 预处理失败 → DLQ
+                SPDLOG_WARN("DetectorService: akto preprocessor failed: {} (payload preview: {})",
+                            pp_result.error(),
+                            raw_payload.substr(0, std::min(raw_payload.size(), size_t(200))));
+                ++parse_errors;
+                metrics_.incrementEventsDropped();
+                if (config_.detector.enable_dlq) {
+                    dlq_.sendRaw(*msg, "Akto preprocessor error: " + pp_result.error());
+                }
+                continue;
+            }
+        }
+
         // 通过 LogMapper 映射为 HttpAccessEvent
-        auto map_result = mapper_.map(raw_payload);
+        auto map_result = mapper_.map(map_input);
 
         if (!map_result) {
             // 映射失败 → DLQ

@@ -10,7 +10,7 @@ kafka:
   consumer:
     bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"
     group_id: "wge-detector-akto"
-    topic: "akto.api.logs2"                     # 输入: Akto API 日志 Topic (Protobuf 格式)
+    topic: "${AKTO_INPUT_TOPIC:-akto.api.logs2}"      # 输入: akto.api.logs (JSON) | akto.api.logs2 (Protobuf)
     dlq_topic: "akto.api.logs2-dlq"             # 死信队列
     partition_assignment_strategy: "cooperative-sticky"
     auto_offset_reset: "latest"

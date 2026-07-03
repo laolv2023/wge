@@ -185,6 +185,11 @@ struct WgeConfig {
 struct MappingConfig {
     /// @brief log_mapping.yaml 文件路径，定义如何将原始日志映射到 HttpAccessEvent
     std::string log_mapping_path{"config/log_mapping.yaml"};
+
+    /// @brief 预处理器类型: "" | "akto"
+    /// "akto" 启用 AktoPreprocessor，处理 Akto JSON 日志的特殊格式
+    /// (JSON 字符串 headers 展开、秒级时间戳→毫秒、HTTP 版本号修正)
+    std::string preprocessor{};
 };
 
 // ============================================================================

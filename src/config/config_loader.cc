@@ -232,6 +232,11 @@ void parseWge(WgeConfig& cfg, const YAML::Node& node) {
 void parseMapping(MappingConfig& cfg, const YAML::Node& node) {
     setIfPresent(cfg.log_mapping_path,
                  getOptionalString(node, "log_mapping_path"));
+    // 兼容 config_file 别名
+    setIfPresent(cfg.log_mapping_path,
+                 getOptionalString(node, "config_file"));
+    setIfPresent(cfg.preprocessor,
+                 getOptionalString(node, "preprocessor"));
 }
 
 /**

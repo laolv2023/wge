@@ -1,29 +1,34 @@
 # wge-detector.yaml — WGE-Kafka 检测器主配置
+# 输入源: Akto API Security 平台的 Kafka Topic
+#   - akto.api.logs  (JSON 格式，旧版 Akto)
+#   - akto.api.logs2 (Protobuf 格式，新版 Akto)
+# 通过环境变量 AKTO_INPUT_TOPIC 可配置，默认 akto.api.logs2
 
 # ===== Kafka 配置 =====
 kafka:
   # Consumer 配置
   consumer:
-    bootstrap_servers: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
-    group_id: "wge-detector-group"
-    topic: "http-access"                    # [可配置] 输入 Topic
-    dlq_topic: "http-access-dlq"            # [可配置] 死信队列 Topic
+    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"
+    group_id: "wge-detector-akto"
+    topic: "${AKTO_INPUT_TOPIC:-akto.api.logs2}"  # [可配置] Akto 输入 Topic: akto.api.logs | akto.api.logs2
+    dlq_topic: "wge-input-dlq"                     # [可配置] 死信队列 Topic
     partition_assignment_strategy: "cooperative-sticky"
     auto_offset_reset: "latest"             # earliest | latest (生产默认 latest, 避免重启回放)
     enable_auto_commit: false               # 手动提交，确保 exactly-once
     session_timeout_ms: 30000
     max_poll_records: 500                   # 单次 poll 最大记录数
     max_poll_interval_ms: 300000
-    fetch_max_bytes: 1048576                # 1MB per fetch
-    security_protocol: "SASL_PLAINTEXT"     # SASL_SSL | SASL_PLAINTEXT | PLAINTEXT
-    sasl_mechanism: "SCRAM-SHA-512"
+    fetch_max_bytes: 2097152                # 2MB per fetch (API 日志 body 可能较大)
+    security_protocol: "${KAFKA_SECURITY_PROTOCOL:-SASL_PLAINTEXT}"  # SASL_SSL | SASL_PLAINTEXT | PLAINTEXT
+    sasl_mechanism: "${KAFKA_SASL_MECHANISM:-SCRAM-SHA-512}"
     sasl_username: "${KAFKA_SASL_USERNAME}"
     sasl_password: "${KAFKA_SASL_PASSWORD}"
 
   # Producer 配置 (告警输出)
   producer:
-    bootstrap_servers: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"
     topic: "akto.threat_detection.malicious_events"  # Akto 告警总线 Topic (借船出海注入)
+    dlq_topic: "wge-alert-dlq"
     acks: "all"                             # 确保所有 ISR 确认
     enable_idempotence: true                # 幂等 Producer
     compression_type: "lz4"
@@ -49,6 +54,11 @@ wge:
 # ===== 日志映射配置 =====
 mapping:
   config_file: "/etc/wge/log_mapping.yaml"  # 映射规则配置文件
+  preprocessor: "akto"                        # 预处理器: "" | "akto"
+                                              # "akto" 启用 AktoPreprocessor:
+                                              #   - 展开 JSON 字符串格式的 headers
+                                              #   - 秒级时间戳 → 毫秒级
+                                              #   - HTTP 版本号修正 (HTTP/1.1 → 1.1)
 
 # ===== 检测调度配置 =====
 detector:
