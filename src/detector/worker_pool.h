@@ -42,6 +42,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // 引入真实 WGE SDK 头文件
@@ -248,11 +249,50 @@ private:
      */
     static void onRuleMatch(const Wge::Rule& rule, void* user_data);
 
+    /**
+     * @brief 告警保护逻辑 — 在 sendAlert 前执行过滤/限流/兜底
+     *
+     * 从 AktoAdapter::convert() 迁移的 3 个保护功能:
+     *   1. 告警分级过滤: 丢弃 RateLimit/LOW 级别
+     *   2. IP 级限流: ≤5条/分钟/IP+Account+Category
+     *   3. collection_id=0 兜底: Host → CollectionID 映射
+     *
+     * @param alert 待检查的告警 (in/out, 可能修改 collection_id)
+     * @return true 允许发送, false 应丢弃
+     */
+    bool shouldSendAlert(WgeAlertEvent& alert);
+
     // ---- 配置 ----
     const Wge::Engine& engine_;          ///< WGE 检测引擎引用（非所有权，外部管理生命周期）
     AlertProducer& producer_;            ///< 告警生产者引用，用于发送检测结果
     metrics::Metrics& metrics_;          ///< Metrics 单例引用，用于指标上报
     WorkerConfig config_;                ///< Worker 配置（构造时补全默认值）
+
+    // ---- 告警保护 ----
+    /// Host → CollectionID 兜底映射 (与 AktoAdapter HOST_COLLECTION_FALLBACK 一致)
+    static const std::unordered_map<std::string, int32_t> HOST_COLLECTION_FALLBACK_;
+
+    /// IP 级限流器 (与 AktoAdapter IpRateLimiter 一致)
+    /// @note 线程安全: 内部有 mutex
+    struct IpRateLimiter {
+        struct Key {
+            std::string ip; std::string account_id; std::string category;
+            bool operator==(const Key& o) const {
+                return ip == o.ip && account_id == o.account_id && category == o.category;
+            }
+        };
+        struct KeyHash {
+            size_t operator()(const Key& k) const {
+                return std::hash<std::string>()(k.ip) ^
+                       (std::hash<std::string>()(k.account_id) << 1) ^
+                       (std::hash<std::string>()(k.category) << 2);
+            }
+        };
+        std::unordered_map<Key, std::deque<int64_t>, KeyHash> windows_;
+        std::mutex mutex_;
+        bool allow(const std::string& ip, const std::string& account_id,
+                   const std::string& category, int max_per_minute = 5);
+    } rate_limiter_;
 
     // ---- 线程池 ----
     std::vector<std::thread> workers_;   ///< Worker 线程容器，start() 时创建

@@ -32,6 +32,7 @@
 #include "kafka/producer.h"
 #include "metrics/metrics.h"
 #include "spdlog/spdlog.h"
+#include "wge_alert.pb.h"  // WgeAlertEvent (for shouldSendAlert)
 
 // ============================================================================
 // 辅助函数: 从 HttpAccessEvent.request_headers 提取 Host header
@@ -64,6 +65,78 @@ std::string extractHostFromHeaders(
 #include "transaction.h"
 
 namespace wge::kafka::detector {
+
+// ============================================================================
+// 告警保护逻辑 (从 AktoAdapter::convert() 迁移)
+// ============================================================================
+
+// Host → CollectionID 兜底映射 (与 AktoAdapter 一致)
+const std::unordered_map<std::string, int32_t> WgeWorkerPool::HOST_COLLECTION_FALLBACK_ = {
+    {"api.example.com", 1},
+    {"admin.example.com", 2},
+};
+
+// IpRateLimiter::allow — IP 级限流 (≤5条/分钟/IP+Account+Category)
+bool WgeWorkerPool::IpRateLimiter::allow(
+    const std::string& ip, const std::string& account_id,
+    const std::string& category, int max_per_minute) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Key key{ip, account_id, category};
+    auto& window = windows_[key];
+
+    auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // 清理 1 分钟前的时间戳
+    while (!window.empty() && window.front() < now - 60) {
+        window.pop_front();
+    }
+
+    if (static_cast<int>(window.size()) >= max_per_minute) {
+        return false;  // 限流
+    }
+    window.push_back(now);
+    return true;
+}
+
+// shouldSendAlert — 告警分级过滤 + IP 限流 + collection_id 兜底
+bool WgeWorkerPool::shouldSendAlert(WgeAlertEvent& alert) {
+    // ── 功能1: 告警分级过滤 ──
+    // 丢弃 RateLimit/LOW 级别，防止 Akto CloudflareWafSyncCron 误封禁
+    if (alert.attack_type() == "RateLimit" || alert.severity() == "LOW") {
+        metrics_.incrementAlertsFiltered();
+        SPDLOG_DEBUG("[worker_pool] Dropping low-severity/RateLimit alert: {}",
+                     alert.alert_id());
+        return false;
+    }
+
+    // ── 功能2: collection_id=0 兜底 ──
+    if (alert.akto_collection_id() == 0) {
+        auto it = HOST_COLLECTION_FALLBACK_.find(alert.request_host());
+        if (it != HOST_COLLECTION_FALLBACK_.end()) {
+            alert.set_akto_collection_id(it->second);
+            SPDLOG_INFO("[worker_pool] Collection ID fallback: host={} → id={}",
+                        alert.request_host(), it->second);
+        } else {
+            metrics_.incrementAlertsCollectionIdZero();
+            SPDLOG_WARN("[worker_pool] Dropping alert: collection_id=0 and no host fallback for {}",
+                        alert.request_host());
+            return false;
+        }
+    }
+
+    // ── 功能3: IP 级限流 (≤5条/分钟/IP+Account+Category) ──
+    if (!rate_limiter_.allow(alert.downstream_ip(),
+                             alert.akto_account_id(),
+                             alert.attack_type())) {
+        metrics_.incrementAlertsRateLimited();
+        SPDLOG_DEBUG("[worker_pool] Rate limited: ip={} category={}",
+                     alert.downstream_ip(), alert.attack_type());
+        return false;
+    }
+
+    return true;
+}
 
 // ============================================================================
 // 构造与析构
@@ -196,8 +269,11 @@ void WgeWorkerPool::stop() {
                     event->request_body(),
                     event->response_status(),
                     extractHostFromHeaders(event->request_headers()));
-                producer_.sendAlert(std::move(alert));
-                metrics_.incrementAlertsProduced();
+                // 告警保护: 分级过滤 + IP 限流 + collection_id 兜底
+                if (shouldSendAlert(*alert)) {
+                    producer_.sendAlert(std::move(alert));
+                    metrics_.incrementAlertsProduced();
+                }
             }
             metrics_.incrementEventsProcessed();
         } catch (const std::exception& e) {
@@ -361,8 +437,11 @@ void WgeWorkerPool::workerLoop(int worker_id) {
                     event->response_status(),
                     extractHostFromHeaders(event->request_headers()));
 
-                producer_.sendAlert(std::move(alert));
-                metrics_.incrementAlertsProduced();
+                // 告警保护: 分级过滤 + IP 限流 + collection_id 兜底
+                if (shouldSendAlert(*alert)) {
+                    producer_.sendAlert(std::move(alert));
+                    metrics_.incrementAlertsProduced();
+                }
                 metrics_.incrementEventsProcessed();
             } else {
                 // 正常检测无匹配

@@ -59,6 +59,15 @@ public:
     /// @brief 已生产的告警总数
     std::atomic<uint64_t> alerts_produced{0};
 
+    /// @brief 被过滤的告警数 (低危/RateLimit)
+    std::atomic<uint64_t> alerts_filtered{0};
+
+    /// @brief 被限流的告警数 (IP 级限流)
+    std::atomic<uint64_t> alerts_rate_limited{0};
+
+    /// @brief collection_id=0 丢弃的告警数
+    std::atomic<uint64_t> alerts_collection_id_zero{0};
+
     /// @brief Kafka produce 错误总数
     std::atomic<uint64_t> kafka_produce_errors{0};
 
@@ -159,6 +168,21 @@ public:
     /// @brief alerts_produced += 1
     void incrementAlertsProduced() noexcept {
         alerts_produced.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// @brief alerts_filtered += 1 (低危/RateLimit 过滤)
+    void incrementAlertsFiltered() noexcept {
+        alerts_filtered.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// @brief alerts_rate_limited += 1 (IP 级限流)
+    void incrementAlertsRateLimited() noexcept {
+        alerts_rate_limited.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// @brief alerts_collection_id_zero += 1
+    void incrementAlertsCollectionIdZero() noexcept {
+        alerts_collection_id_zero.fetch_add(1, std::memory_order_relaxed);
     }
 
     /// @brief kafka_produce_errors += 1
