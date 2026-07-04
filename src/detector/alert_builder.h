@@ -10,6 +10,7 @@
  * 线程安全: 所有方法为静态纯函数，不访问共享状态，天然线程安全。
  */
 
+#include <cctype>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -83,6 +84,9 @@ private:
     [[nodiscard]] static std::string inferAttackType(
         const std::string& operator_name,
         const std::vector<std::string>& rule_tags);
+
+    /// @brief WGE 数字严重级别 → Akto 字符串 (CRITICAL/HIGH/MEDIUM/LOW)
+    [[nodiscard]] static std::string mapSeverityToAkto(int wge_severity);
     /**
      * @brief 生成 UUID v7 (timestamp-ordered UUID)
      *

@@ -44,12 +44,12 @@ std::string extractHostFromHeaders(
     const google::protobuf::RepeatedPtrField<wge::kafka::Header>& headers) {
     for (const auto& h : headers) {
         const std::string& key = h.key();
-        // 大小写不敏感比较
+        // 大小写不敏感比较 (使用 static_cast<unsigned char> 避免 char 符号问题)
         if (key.size() == 4 &&
-            std::tolower(key[0]) == 'h' &&
-            std::tolower(key[1]) == 'o' &&
-            std::tolower(key[2]) == 's' &&
-            std::tolower(key[3]) == 't') {
+            std::tolower(static_cast<unsigned char>(key[0])) == 'h' &&
+            std::tolower(static_cast<unsigned char>(key[1])) == 'o' &&
+            std::tolower(static_cast<unsigned char>(key[2])) == 's' &&
+            std::tolower(static_cast<unsigned char>(key[3])) == 't') {
             return h.value();
         }
     }

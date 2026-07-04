@@ -2,6 +2,14 @@
 /// @brief Akto 适配器集成测试 — 使用提供的真实日志样本验证预处理+映射全链路
 ///
 /// 测试流程: 原始 Akto JSON → AktoPreprocessor → LogMapper → HttpAccessEvent
+///
+/// 注意: 测试 14-20 调用 AktoAdapter::convert() (已标注 [[deprecated]])，
+/// 该方法仅保留用于测试，生产路径已移至 AlertProducer::serializeAlert()。
+
+// 抑制 deprecated 警告: 测试需要调用已废弃的 convert() 方法
+#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 
 #include <gtest/gtest.h>
 #include <string>

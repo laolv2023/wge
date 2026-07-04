@@ -177,7 +177,9 @@ std::shared_ptr<WgeAlertEvent> AlertBuilder::build(
         std::string attack_type = inferAttackType(
             first_rule.operator_name, first_rule.rule_tags);
         alert->set_attack_type(attack_type);
-        alert->set_severity(first_rule.rule_severity);
+        // severity: WGE 用 0-7 数字 (syslog 级别)，Akto 用 CRITICAL/HIGH/MEDIUM/LOW
+        // 映射: 0-2 → CRITICAL, 3-4 → HIGH, 5 → MEDIUM, 6-7 → LOW
+        alert->set_severity(mapSeverityToAkto(first_rule.severity));
     } else {
         alert->set_attack_type("SecurityMisconfig");
         alert->set_severity("MEDIUM");
@@ -215,30 +217,34 @@ std::string AlertBuilder::inferAttackType(
 
     // 2. 从 rule_tags 推断 (OWASP CRS tag 格式: attack-sqli, attack-xss 等)
     for (const auto& tag : rule_tags) {
-        if (tag.find("sqli") != std::string::npos ||
-            tag.find("sql-injection") != std::string::npos) {
+        // 转小写匹配
+        std::string lower_tag = tag;
+        for (auto& c : lower_tag) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower_tag.find("sqli") != std::string::npos ||
+            lower_tag.find("sql-injection") != std::string::npos) {
             return "SQLInjection";
         }
-        if (tag.find("xss") != std::string::npos) {
+        if (lower_tag.find("xss") != std::string::npos) {
             return "XSS";
         }
-        if (tag.find("lfi") != std::string::npos ||
-            tag.find("local-file-inclusion") != std::string::npos) {
+        if (lower_tag.find("lfi") != std::string::npos ||
+            lower_tag.find("local-file-inclusion") != std::string::npos) {
             return "LocalFileInclusionLFIRFI";
         }
-        if (tag.find("rfi") != std::string::npos ||
-            tag.find("remote-file-inclusion") != std::string::npos) {
+        if (lower_tag.find("rfi") != std::string::npos ||
+            lower_tag.find("remote-file-inclusion") != std::string::npos) {
             return "LocalFileInclusionLFIRFI";
         }
-        if (tag.find("rce") != std::string::npos ||
-            tag.find("command-injection") != std::string::npos ||
-            tag.find("os-command") != std::string::npos) {
+        // 用前缀匹配避免 'rce' 误匹配 'force'
+        if (lower_tag.find("rce") == 0 || lower_tag.find("-rce") != std::string::npos ||
+            lower_tag.find("command-injection") != std::string::npos ||
+            lower_tag.find("os-command") != std::string::npos) {
             return "OSCommandInjection";
         }
-        if (tag.find("ssrf") != std::string::npos) {
+        if (lower_tag.find("ssrf") != std::string::npos) {
             return "SSRF";
         }
-        if (tag.find("xxe") != std::string::npos) {
+        if (lower_tag.find("xxe") != std::string::npos) {
             return "XXE";
         }
     }
@@ -251,6 +257,32 @@ std::string AlertBuilder::inferAttackType(
 
     // 4. 兜底
     return "SecurityMisconfig";
+}
+
+// ============================================================================
+// mapSeverityToAkto — WGE 数字严重级别 → Akto 字符串
+// ============================================================================
+
+std::string AlertBuilder::mapSeverityToAkto(int wge_severity) {
+    // WGE (syslog RFC 5424): 0=EMERGENCY, 1=ALERT, 2=CRITICAL, 3=ERROR,
+    //                        4=WARNING, 5=NOTICE, 6=INFO, 7=DEBUG
+    // Akto: CRITICAL, HIGH, MEDIUM, LOW, INFO
+    switch (wge_severity) {
+        case 0:  // EMERGENCY
+        case 1:  // ALERT
+        case 2:  // CRITICAL
+            return "CRITICAL";
+        case 3:  // ERROR
+        case 4:  // WARNING
+            return "HIGH";
+        case 5:  // NOTICE
+            return "MEDIUM";
+        case 6:  // INFO
+        case 7:  // DEBUG
+            return "LOW";
+        default:
+            return "MEDIUM";
+    }
 }
 
 }  // namespace wge::kafka::detector
