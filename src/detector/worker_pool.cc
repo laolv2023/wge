@@ -96,6 +96,24 @@ bool WgeWorkerPool::IpRateLimiter::allow(
         return false;  // 限流
     }
     window.push_back(now);
+
+    // 定期清理空窗口，防止 windows_ 无限增长
+    // 每 1024 次调用清理一次 (避免每次调用都遍历)
+    static uint64_t call_counter = 0;
+    if ((++call_counter & 0x3FF) == 0) {  // & 1023 == 0
+        for (auto it = windows_.begin(); it != windows_.end(); ) {
+            auto& w = it->second;
+            while (!w.empty() && w.front() < now - 60) {
+                w.pop_front();
+            }
+            if (w.empty()) {
+                it = windows_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -115,7 +133,7 @@ bool WgeWorkerPool::shouldSendAlert(WgeAlertEvent& alert) {
         auto it = HOST_COLLECTION_FALLBACK_.find(alert.request_host());
         if (it != HOST_COLLECTION_FALLBACK_.end()) {
             alert.set_akto_collection_id(it->second);
-            SPDLOG_INFO("[worker_pool] Collection ID fallback: host={} → id={}",
+            SPDLOG_DEBUG("[worker_pool] Collection ID fallback: host={} → id={}",
                         alert.request_host(), it->second);
         } else {
             metrics_.incrementAlertsCollectionIdZero();
