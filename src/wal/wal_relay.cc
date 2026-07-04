@@ -207,6 +207,14 @@ void WalRelay::relayLoop(int64_t scan_interval_ms) {
                 continue;
             }
 
+            // 路径遍历防护: 拒绝包含 / 或 .. 的文件名
+            // 防止恶意构造的文件名逃逸 wal_dir_ 目录
+            if (name.find('/') != std::string::npos ||
+                name.find("..") != std::string::npos) {
+                SPDLOG_WARN("WalRelay: skipping suspicious filename '{}'", name);
+                continue;
+            }
+
             std::string file_path = wal_dir_;
             if (!file_path.empty() && file_path.back() != '/') {
                 file_path += '/';

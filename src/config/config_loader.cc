@@ -299,6 +299,22 @@ void parseDetector(DetectorConfig& cfg, const YAML::Node& node) {
     setIfPresent(cfg.wal_dir, getOptionalString(node, "wal_dir"));
     setIfPresent(cfg.wal_segment_max_size,
                  getOptionalInt64(node, "wal_segment_max_size"));
+
+    // Host → CollectionID 兜底映射
+    setIfPresent(cfg.rate_limit_per_minute,
+                 getOptionalInt32(node, "rate_limit_per_minute"));
+    setIfPresent(cfg.filter_low_severity,
+                 getOptionalBool(node, "filter_low_severity"));
+
+    // 解析 host_collection_map (YAML map 格式)
+    if (node["host_collection_map"] && node["host_collection_map"].IsMap()) {
+        const auto& hcm = node["host_collection_map"];
+        for (const auto& kv : hcm) {
+            std::string host = kv.first.as<std::string>();
+            int32_t col_id = kv.second.as<int32_t>();
+            cfg.host_collection_map[host] = col_id;
+        }
+    }
 }
 
 /**

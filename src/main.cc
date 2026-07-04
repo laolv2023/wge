@@ -41,8 +41,6 @@
 #include "detector/worker_pool.h"
 #include "kafka/consumer.h"
 #include "kafka/dlq.h"
-#include "akto/akto_adapter.h"
-#include "akto/akto_dlq.h"
 #include "kafka/producer.h"
 #include "mapper/mapper.h"
 #include "mapper/mapper_config.h"
@@ -440,25 +438,8 @@ int main(int argc, char* argv[]) {
     SPDLOG_INFO("DeadLetterQueue initialized: topic={}",
                 producer_cfg.dlq_topic);
 
-    // ---- 9.5 初始化 AktoAdapter (V6.0: 借船出海注入 Akto 告警总线) ----
-    // 设计报告第5章: AktoAdapter 将 WgeAlertEvent 转换为 MaliciousEventKafkaEnvelope JSON,
-    // 由 AlertProducer 发送到 akto.threat_detection.malicious_events Topic。
-    // Akto 原生 SendMaliciousEventsToBackend 任务会消费此 Topic 并转发至 Backend,
-    // 完美穿透 AuthenticationInterceptor (100% 零侵入)。
-    SPDLOG_INFO("Initializing AktoAdapter...");
-    // AktoAdapter 的 DLQ (可选, 用于捕获 Adapter 转换失败的告警)
-    // 使用 producer_cfg (已桥接的 kafka::ProducerConfig) 而非 config.kafka.producer,
-    // 确保安全协议/SASL 配置一致
-    auto akto_dlq = std::make_shared<wge::akto::AktoDlq>(
-        producer_cfg.bootstrap_servers,
-        "wge-akto-adapter-dlq",
-        producer_cfg.security_protocol,
-        producer_cfg.sasl_mechanism,
-        producer_cfg.sasl_username,
-        producer_cfg.sasl_password);
-    wge::akto::AktoAdapter akto_adapter(akto_dlq);
-    SPDLOG_INFO("AktoAdapter initialized: output_topic={}",
-                config.kafka.producer.topic);
+    // 注: AktoAdapter 已废弃，转换逻辑已移至 AlertProducer::serializeAlert()
+    // 和 WorkerPool::shouldSendAlert()。不再需要初始化 AktoAdapter。
 
     // ---- 10. 初始化 WgeWorkerPool ----
     WorkerConfig worker_cfg;
@@ -471,6 +452,12 @@ int main(int argc, char* argv[]) {
                 "timeout_ms={}",
                 worker_cfg.worker_threads, worker_cfg.max_pending_tasks,
                 worker_cfg.task_timeout_ms);
+
+    // 配置告警保护参数 (从配置文件加载)
+    pool.setAlertGuardConfig(
+        config.detector.host_collection_map,
+        config.detector.rate_limit_per_minute,
+        config.detector.filter_low_severity);
 
     // ---- 11. 初始化 DetectorService ----
     DetectorService detector_service(

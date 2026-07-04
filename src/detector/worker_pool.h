@@ -150,6 +150,17 @@ public:
                   const WorkerConfig& config);
 
     /**
+     * @brief 设置告警保护参数 (从配置文件加载)
+     * @param host_map  Host → CollectionID 兜底映射
+     * @param rate_limit  IP 限流阈值 (每分钟)
+     * @param filter_low  是否丢弃 LOW/RateLimit 告警
+     */
+    void setAlertGuardConfig(
+        const std::unordered_map<std::string, int32_t>& host_map,
+        int32_t rate_limit_per_minute,
+        bool filter_low_severity);
+
+    /**
      * @brief 析构函数
      *
      * 若尚未调用 stop()，自动优雅停止。
@@ -269,8 +280,14 @@ private:
     WorkerConfig config_;                ///< Worker 配置（构造时补全默认值）
 
     // ---- 告警保护 ----
-    /// Host → CollectionID 兜底映射 (与 AktoAdapter HOST_COLLECTION_FALLBACK 一致)
-    static const std::unordered_map<std::string, int32_t> HOST_COLLECTION_FALLBACK_;
+    /// Host → CollectionID 兜底映射 (从配置文件加载，默认为空)
+    std::unordered_map<std::string, int32_t> host_collection_fallback_{};
+
+    /// IP 级限流阈值 (每分钟，默认 5)
+    int32_t rate_limit_per_minute_{5};
+
+    /// 是否丢弃 LOW/RateLimit 告警 (默认 true)
+    bool filter_low_severity_{true};
 
     /// IP 级限流器 (与 AktoAdapter IpRateLimiter 一致)
     /// @note 线程安全: 内部有 mutex

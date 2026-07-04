@@ -74,6 +74,17 @@ detector:
   task_timeout_ms: 5000                     # 单任务检测超时 (超时放弃进 DLQ)
   slow_consumer_threshold_ms: 5000          # 处理延迟告警阈值
 
+  # 告警保护配置
+  filter_low_severity: true                 # 丢弃 LOW/RateLimit 级别告警
+  rate_limit_per_minute: 5                  # IP+Account+Category 每分钟最大告警数
+
+  # Host → API Collection ID 兜底映射
+  # 当 akto_vxlan_id 缺失或解析为 0 时，用请求 Host header 查此映射
+  host_collection_map:
+    "api.example.com": 1
+    "admin.example.com": 2
+    # 生产环境应根据 Akto API 集合配置
+
   # 健康检查
   health_check_port: 9100
   readiness_threshold_lag: 10000            # Consumer lag > 此值则标记 not-ready

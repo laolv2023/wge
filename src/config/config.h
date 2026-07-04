@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace wge::kafka::config {
@@ -244,6 +245,17 @@ struct DetectorConfig {
 
     /// @brief WAL 段文件最大大小 (字节)
     int64_t wal_segment_max_size{256 * 1024 * 1024};  // 256 MB
+
+    /// @brief Host → API Collection ID 兜底映射
+    /// 当 akto_vxlan_id 缺失或解析为 0 时，用请求 Host header 查此映射
+    /// 配置格式: { "api.example.com": 1, "admin.example.com": 2 }
+    std::unordered_map<std::string, int32_t> host_collection_map{};
+
+    /// @brief IP 级限流: 每个IP+Account+Category 每分钟最大告警数
+    int32_t rate_limit_per_minute{5};
+
+    /// @brief 是否丢弃低危告警 (severity == "LOW" 或 attack_type == "RateLimit")
+    bool filter_low_severity{true};
 };
 
 // ============================================================================

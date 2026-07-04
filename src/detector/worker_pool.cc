@@ -70,11 +70,19 @@ namespace wge::kafka::detector {
 // 告警保护逻辑 (从 AktoAdapter::convert() 迁移)
 // ============================================================================
 
-// Host → CollectionID 兜底映射 (与 AktoAdapter 一致)
-const std::unordered_map<std::string, int32_t> WgeWorkerPool::HOST_COLLECTION_FALLBACK_ = {
-    {"api.example.com", 1},
-    {"admin.example.com", 2},
-};
+// setAlertGuardConfig — 从配置文件加载告警保护参数
+void WgeWorkerPool::setAlertGuardConfig(
+    const std::unordered_map<std::string, int32_t>& host_map,
+    int32_t rate_limit_per_minute,
+    bool filter_low_severity) {
+    host_collection_fallback_ = host_map;
+    rate_limit_per_minute_ = rate_limit_per_minute > 0 ? rate_limit_per_minute : 5;
+    filter_low_severity_ = filter_low_severity;
+    SPDLOG_INFO("[worker_pool] AlertGuard configured: host_map={} entries, "
+                "rate_limit={}/min, filter_low={}",
+                host_collection_fallback_.size(),
+                rate_limit_per_minute_, filter_low_severity_);
+}
 
 // IpRateLimiter::allow — IP 级限流 (≤5条/分钟/IP+Account+Category)
 bool WgeWorkerPool::IpRateLimiter::allow(
@@ -99,8 +107,9 @@ bool WgeWorkerPool::IpRateLimiter::allow(
 
     // 定期清理空窗口，防止 windows_ 无限增长
     // 每 1024 次调用清理一次 (避免每次调用都遍历)
-    static uint64_t call_counter = 0;
-    if ((++call_counter & 0x3FF) == 0) {  // & 1023 == 0
+    // 使用原子计数器避免数据竞争 (static 局部变量在多线程下不安全)
+    static std::atomic<uint64_t> call_counter{0};
+    if ((call_counter.fetch_add(1, std::memory_order_relaxed) & 0x3FF) == 0) {
         for (auto it = windows_.begin(); it != windows_.end(); ) {
             auto& w = it->second;
             while (!w.empty() && w.front() < now - 60) {
@@ -121,7 +130,8 @@ bool WgeWorkerPool::IpRateLimiter::allow(
 bool WgeWorkerPool::shouldSendAlert(WgeAlertEvent& alert) {
     // ── 功能1: 告警分级过滤 ──
     // 丢弃 RateLimit/LOW 级别，防止 Akto CloudflareWafSyncCron 误封禁
-    if (alert.attack_type() == "RateLimit" || alert.severity() == "LOW") {
+    if (filter_low_severity_ &&
+        (alert.attack_type() == "RateLimit" || alert.severity() == "LOW")) {
         metrics_.incrementAlertsFiltered();
         SPDLOG_DEBUG("[worker_pool] Dropping low-severity/RateLimit alert: {}",
                      alert.alert_id());
@@ -130,8 +140,8 @@ bool WgeWorkerPool::shouldSendAlert(WgeAlertEvent& alert) {
 
     // ── 功能2: collection_id=0 兜底 ──
     if (alert.akto_collection_id() == 0) {
-        auto it = HOST_COLLECTION_FALLBACK_.find(alert.request_host());
-        if (it != HOST_COLLECTION_FALLBACK_.end()) {
+        auto it = host_collection_fallback_.find(alert.request_host());
+        if (it != host_collection_fallback_.end()) {
             alert.set_akto_collection_id(it->second);
             SPDLOG_DEBUG("[worker_pool] Collection ID fallback: host={} → id={}",
                         alert.request_host(), it->second);
@@ -143,10 +153,11 @@ bool WgeWorkerPool::shouldSendAlert(WgeAlertEvent& alert) {
         }
     }
 
-    // ── 功能3: IP 级限流 (≤5条/分钟/IP+Account+Category) ──
+    // ── 功能3: IP 级限流 (≤N条/分钟/IP+Account+Category) ──
     if (!rate_limiter_.allow(alert.downstream_ip(),
                              alert.akto_account_id(),
-                             alert.attack_type())) {
+                             alert.attack_type(),
+                             rate_limit_per_minute_)) {
         metrics_.incrementAlertsRateLimited();
         SPDLOG_DEBUG("[worker_pool] Rate limited: ip={} category={}",
                      alert.downstream_ip(), alert.attack_type());
