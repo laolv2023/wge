@@ -104,6 +104,11 @@ LogMapper::LogMapper(const MapperConfig& config)
             // Protobuf 无需额外映射器，直接反序列化即可
             spdlog::debug("LogMapper: using direct Protobuf deserialization");
             break;
+
+        case Format::AktoProtobuf:
+            // AktoProtobuf 无需额外映射器，直接反序列化 Akto HttpResponseParam 即可
+            spdlog::debug("LogMapper: using direct AktoProtobuf deserialization");
+            break;
     }
 }
 
