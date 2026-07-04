@@ -51,7 +51,7 @@
 #include "spdlog/spdlog.h"
 
 // WGE SDK
-#include "wge/engine.h"
+#include "engine.h"
 
 // ============================================================================
 // 编译时版本号 (由 CMake 注入)
@@ -362,19 +362,24 @@ int main(int argc, char* argv[]) {
     // WGE 引擎是核心安全检测组件，需要加载规则文件和引擎配置
     SPDLOG_INFO("Initializing WGE Engine...");
 
-    wge::Engine engine;
+    Wge::Engine engine(spdlog::level::info);
     try {
         // 加载所有 WGE 规则文件
         for (const auto& rule_file : config.wge.rule_files) {
             SPDLOG_INFO("Loading WGE rules from: {}", rule_file);
-            engine.loadRules(rule_file);
+            auto load_result = engine.loadFromFile(rule_file);
+            if (!load_result) {
+                SPDLOG_ERROR("Failed to load rules from '{}': {}",
+                             rule_file, load_result.error());
+                if (config.wge.strict_mode) {
+                    return 1;
+                }
+            }
         }
-        // 初始化引擎（加载引擎配置，如变量定义、变换规则等）
-        engine.init(config.wge.engine_config_path);
+        // 初始化引擎（真实 SDK 的 init() 不接受参数）
+        engine.init();
     } catch (const std::exception& e) {
         SPDLOG_ERROR("Failed to initialize WGE Engine: {}", e.what());
-        // strict_mode: 严格模式下引擎初始化失败则退出
-        // 非严格模式下继续运行（告警可能不准确）
         if (config.wge.strict_mode) {
             return 1;
         }

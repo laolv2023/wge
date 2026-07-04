@@ -112,28 +112,35 @@ void HttpExtractorAdapter::buildResponseHeaderIndex() {
 // ============================================================================
 
 HeaderFind HttpExtractorAdapter::requestHeaderFind() const {
-    // 返回 Lambda 闭包，捕获 this 指针
-    // 调用者（WGE 引擎）传入 key，Lambda 在 request_header_index_ 中查找
-    // @param key: 要查找的 header 名称（大小写不敏感）
-    // @param value: 输出参数，若找到则写入第一个匹配的 value
-    // @returns: true 表示找到，false 表示未找到
-    return [this](std::string_view key, std::string_view& value) -> bool {
-        std::string lower_key = toLower(key);  // 统一转为小写查找
-        auto it = request_header_index_.find(lower_key);
-        if (it != request_header_index_.end() && !it->second.empty()) {
-            value = it->second[0];  // 返回第一个值（若有同名 header，取首个）
-            return true;
+    // WGE SDK HeaderFind 签名:
+    //   std::function<std::vector<std::string_view>(const std::string& lower_case_key)>
+    // SDK 传入的 key 已经是小写，直接在索引中查找
+    return [this](const std::string& lower_case_key) -> std::vector<std::string_view> {
+        auto it = request_header_index_.find(lower_case_key);
+        if (it != request_header_index_.end()) {
+            // 返回所有匹配值（vector<string_view> 指向内部 string 数据）
+            std::vector<std::string_view> result;
+            result.reserve(it->second.size());
+            for (const auto& v : it->second) {
+                result.emplace_back(v);
+            }
+            return result;
         }
-        return false;
+        return {};
     };
 }
 
 HeaderTraversal HttpExtractorAdapter::requestHeaderTraversal() const {
-    // 返回 Lambda 闭包用于遍历所有请求 headers
-    // @param visitor: WGE 引擎提供的回调，签名为 void(string_view key, string_view value)
-    return [this](std::function<void(std::string_view, std::string_view)> visitor) {
+    // WGE SDK HeaderTraversal 签名:
+    //   std::function<void(HeaderTraversalCallback)>
+    //   HeaderTraversalCallback = std::function<bool(std::string_view lower_case_key, std::string_view value)>
+    // callback 返回 false 表示停止遍历
+    return [this](Wge::HeaderTraversalCallback callback) {
         for (const auto& [key, value] : request_header_list_) {
-            visitor(key, value);  // key 保留原始大小写
+            std::string lower_key = toLower(key);
+            if (!callback(lower_key, value)) {
+                break;  // callback 返回 false，停止遍历
+            }
         }
     };
 }
@@ -147,23 +154,27 @@ size_t HttpExtractorAdapter::requestHeaderCount() const {
 // ============================================================================
 
 HeaderFind HttpExtractorAdapter::responseHeaderFind() const {
-    // 响应 header 查找，逻辑与请求 header 查找一致
-    return [this](std::string_view key, std::string_view& value) -> bool {
-        std::string lower_key = toLower(key);
-        auto it = response_header_index_.find(lower_key);
-        if (it != response_header_index_.end() && !it->second.empty()) {
-            value = it->second[0];  // 返回第一个匹配值
-            return true;
+    return [this](const std::string& lower_case_key) -> std::vector<std::string_view> {
+        auto it = response_header_index_.find(lower_case_key);
+        if (it != response_header_index_.end()) {
+            std::vector<std::string_view> result;
+            result.reserve(it->second.size());
+            for (const auto& v : it->second) {
+                result.emplace_back(v);
+            }
+            return result;
         }
-        return false;
+        return {};
     };
 }
 
 HeaderTraversal HttpExtractorAdapter::responseHeaderTraversal() const {
-    // 响应 header 遍历，逻辑与请求 header 遍历一致
-    return [this](std::function<void(std::string_view, std::string_view)> visitor) {
+    return [this](Wge::HeaderTraversalCallback callback) {
         for (const auto& [key, value] : response_header_list_) {
-            visitor(key, value);
+            std::string lower_key = toLower(key);
+            if (!callback(lower_key, value)) {
+                break;
+            }
         }
     };
 }

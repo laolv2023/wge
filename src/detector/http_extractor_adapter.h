@@ -23,6 +23,9 @@
 #include <unordered_map>
 #include <vector>
 
+// 引入真实 WGE SDK 的 HeaderFind/HeaderTraversal 类型定义
+#include "http_extractor.h"
+
 namespace wge::kafka {
 
 // 前向声明 protobuf 类型
@@ -31,28 +34,15 @@ class HttpAccessEvent;
 namespace detector {
 
 // ============================================================================
-// 类型别名 — WGE 引擎所需回调签名
+// 类型别名 — 使用 WGE SDK 定义的回调签名
 // ============================================================================
-
-/**
- * @brief Header 查找回调
- *
- * 给定 header key (大小写不敏感)，返回第一个匹配的 value。
- *
- * @param key  要查找的 header 名称
- * @param value [out] 若找到，写入对应 value
- * @return true  找到至少一个匹配
- * @return false 未找到
- */
-using HeaderFind = std::function<bool(std::string_view key, std::string_view& value)>;
-
-/**
- * @brief Header 遍历回调
- *
- * 对每个 header 调用一次 visitor 回调。
- * visitor 签名为 void(std::string_view key, std::string_view value)
- */
-using HeaderTraversal = std::function<void(std::function<void(std::string_view, std::string_view)>)>;
+// WGE SDK (http_extractor.h) 定义:
+//   HeaderFind = std::function<std::vector<std::string_view>(const std::string&)>
+//   HeaderTraversal = std::function<void(HeaderTraversalCallback)>
+//   HeaderTraversalCallback = std::function<bool(std::string_view, std::string_view)>
+// 直接使用 Wge 命名空间中的类型，无需重新定义
+using Wge::HeaderFind;
+using Wge::HeaderTraversal;
 
 // ============================================================================
 // HttpExtractorAdapter

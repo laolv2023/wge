@@ -44,15 +44,10 @@
 #include <thread>
 #include <vector>
 
-namespace wge {
-
-// 前向声明 WGE 类型 (来自 wge 库)
-class Engine;
-class Transaction;
-struct Rule;
-struct Detail;
-
-}  // namespace wge
+// 引入真实 WGE SDK 头文件
+#include "engine.h"
+#include "rule.h"
+#include "transaction.h"
 
 namespace wge::kafka {
 
@@ -148,7 +143,7 @@ public:
      *
      * @note engine 和 producer 生命周期必须长于 WgeWorkerPool
      */
-    WgeWorkerPool(const wge::Engine& engine,
+    WgeWorkerPool(const Wge::Engine& engine,
                   AlertProducer& producer,
                   metrics::Metrics& metrics,
                   const WorkerConfig& config);
@@ -251,10 +246,10 @@ private:
      * @param rule      匹配的规则
      * @param user_data AlertResult 指针
      */
-    static void onRuleMatch(const wge::Rule& rule, void* user_data);
+    static void onRuleMatch(const Wge::Rule& rule, void* user_data);
 
     // ---- 配置 ----
-    const wge::Engine& engine_;          ///< WGE 检测引擎引用（非所有权，外部管理生命周期）
+    const Wge::Engine& engine_;          ///< WGE 检测引擎引用（非所有权，外部管理生命周期）
     AlertProducer& producer_;            ///< 告警生产者引用，用于发送检测结果
     metrics::Metrics& metrics_;          ///< Metrics 单例引用，用于指标上报
     WorkerConfig config_;                ///< Worker 配置（构造时补全默认值）

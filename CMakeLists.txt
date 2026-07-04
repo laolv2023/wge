@@ -88,6 +88,15 @@ target_link_libraries(wge_kafka_detector_core PUBLIC
     re2::re2
     yaml-cpp
     spdlog::spdlog
+    # WGE SDK 依赖库
+    /home/z/my-project/antlr4-local/lib/libantlr4-runtime.a
+    /home/z/my-project/sys-libs/usr/lib/x86_64-linux-gnu/libhs.a
+    /home/z/my-project/libinjection-local/lib/libinjection.a
+    /home/z/my-project/sys-libs/usr/lib/x86_64-linux-gnu/libpcre2-8.a
+    /home/z/my-project/sys-libs/usr/lib/x86_64-linux-gnu/libxml2.a
+    pthread
+    dl
+    m
 )
 if(prometheus-cpp_FOUND)
     target_link_libraries(wge_kafka_detector_core PRIVATE prometheus-cpp::core prometheus-cpp::pull)

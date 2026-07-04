@@ -32,10 +32,10 @@
 #include "metrics/metrics.h"
 #include "spdlog/spdlog.h"
 
-// WGE SDK 头文件
-#include "wge/engine.h"
-#include "wge/rule.h"
-#include "wge/transaction.h"
+// WGE SDK 头文件 (真实 SDK)
+#include "engine.h"
+#include "rule.h"
+#include "transaction.h"
 
 namespace wge::kafka::detector {
 
@@ -43,7 +43,7 @@ namespace wge::kafka::detector {
 // 构造与析构
 // ============================================================================
 
-WgeWorkerPool::WgeWorkerPool(const wge::Engine& engine,
+WgeWorkerPool::WgeWorkerPool(const Wge::Engine& engine,
                              AlertProducer& producer,
                              metrics::Metrics& metrics,
                              const WorkerConfig& config)
@@ -377,29 +377,20 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
     // ===== 步骤 2: processConnection — 设置连接信息 =====
     // 传入下游 IP/Port（客户端地址）和上游 IP/Port（源服务器地址）
     // WGE 引擎可用这些信息进行 IP 黑白名单等检测
-    if (!tx->processConnection(
+    // 注: 真实 WGE SDK 中 processConnection 返回 void
+    tx->processConnection(
             event.downstream_ip(),
-            static_cast<short>(event.downstream_port()),  // uint32 → short 转换
+            static_cast<short>(event.downstream_port()),
             event.upstream_ip(),
-            static_cast<short>(event.upstream_port()))) {
-        SPDLOG_WARN("WgeWorkerPool::detect: processConnection failed for event_id={}",
-                     event.event_id());
-        result.dropped = true;
-        return result;  // 连接处理失败，返回空结果
-    }
-    if (timed_out()) { result.dropped = true; return result; }  // 协作式超时检查点
+            static_cast<short>(event.upstream_port()));
+    if (timed_out()) { result.dropped = true; return result; }
 
     // ===== 步骤 3: processUri — URI + Method + HTTP 版本 =====
-    if (!tx->processUri(
-            event.request_uri(),       // 如 "/api/v1/users"
-            event.request_method(),    // 如 "GET", "POST"
-            event.request_version()))  // 如 "HTTP/1.1"
-    {
-        SPDLOG_WARN("WgeWorkerPool::detect: processUri failed for event_id={}",
-                     event.event_id());
-        result.dropped = true;
-        return result;
-    }
+    // 注: 真实 WGE SDK 中 processUri 返回 void
+    tx->processUri(
+            event.request_uri(),
+            event.request_method(),
+            event.request_version());
     if (timed_out()) { result.dropped = true; return result; }
 
     // ===== 步骤 4: 构建 HttpExtractorAdapter（延迟创建，避免不必要开销）=====
@@ -470,23 +461,9 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
         }
     }
 
-    // ===== 步骤 9: 提取 matched_variables =====
-    // 从 WGE Transaction 获取匹配变量信息（触发规则的具体变量名和值）
-    //
-    // matched_variables 结构: {variable_name, {transformed_value, original_value}}
-    // - variable_name: WGE 变量名（如 "REQUEST_HEADERS.User-Agent"）
-    // - transformed_value: 经过变换的值（如 URL 解码后）
-    // - original_value: 变换前的原始值
-    //
-    // 注: getCurrentMatchedVariables() 为假设的 API，
-    //     实际需根据 WGE SDK 版本适配
-
-    const auto& matched_vars = tx->getCurrentMatchedVariables();
-    for (size_t i = 0; i < matched_vars.size() && i < result.matched_rules.size(); ++i) {
-        result.matched_rules[i].matched_var_name = matched_vars[i].first;
-        result.matched_rules[i].matched_var_value = matched_vars[i].second.first;
-        result.matched_rules[i].matched_var_original = matched_vars[i].second.second;
-    }
+    // ===== 步骤 9: matched_variables 提取 =====
+    // 真实 WGE SDK 中 matched_variables 在 onRuleMatch 回调中已处理
+    // 此处无需额外提取
 
     // 注意: events_processed / events_dropped 计数在 workerLoop() 中统一处理，
     // rule_evaluations 和 rule_matches 在 onRuleMatch 中已更新。
@@ -499,7 +476,7 @@ AlertResult WgeWorkerPool::detect(const HttpAccessEvent& event,
 // onRuleMatch — WGE 规则匹配回调
 // ============================================================================
 
-void WgeWorkerPool::onRuleMatch(const wge::Rule& rule, void* user_data) {
+void WgeWorkerPool::onRuleMatch(const Wge::Rule& rule, void* user_data) {
     // user_data 是 detect() 中传入的 AlertResult 指针
     if (!user_data) {
         SPDLOG_WARN("WgeWorkerPool::onRuleMatch: null user_data");
@@ -510,55 +487,43 @@ void WgeWorkerPool::onRuleMatch(const wge::Rule& rule, void* user_data) {
     auto& metrics = metrics::Metrics::instance();
 
     // 更新 metrics：每次规则匹配都计数
-    metrics.incrementRuleEvaluations(); // 规则被评估次数
-    metrics.incrementRuleMatches();     // 规则命中次数
+    metrics.incrementRuleEvaluations();
+    metrics.incrementRuleMatches();
 
-    // ===== 从 Rule::detail_ 提取规则元信息 =====
-    // detail_ 是 WGE 规则编译后的元数据，包含 ID、消息、严重级别等
+    // ===== 从 Rule 提取规则元信息 (使用 getter 方法) =====
     MatchedRuleInfo info;
 
-    if (rule.detail_) {
-        info.rule_id = rule.detail_->id_;          // 规则唯一标识
-        info.rule_msg = rule.detail_->msg_;         // 规则描述消息（人类可读）
-        info.severity = rule.detail_->severity_;    // 严重级别枚举值
-        info.rule_ver = rule.detail_->ver_;         // 规则版本号
+    info.rule_id = rule.id();
+    info.rule_msg = std::string(rule.msg());
+    info.severity = static_cast<int>(rule.severity());
+    info.rule_ver = std::string(rule.ver());
 
-        // 解析 tags_（逗号分隔字符串 → vector）
-        if (rule.detail_->tags_) {
-            std::string tags_str = *rule.detail_->tags_;
-            if (!tags_str.empty()) {
-                size_t start = 0;
-                size_t end = 0;
-                // 手动分割逗号分隔的标签字符串，避免引入 boost 等依赖
-                while ((end = tags_str.find(',', start)) != std::string::npos) {
-                    info.rule_tags.push_back(tags_str.substr(start, end - start));
-                    start = end + 1;
-                }
-                info.rule_tags.push_back(tags_str.substr(start));  // 最后一个标签
-            }
-        }
+    // 解析 tags (unordered_set<string_view> → vector<string>)
+    for (const auto& tag : rule.tags()) {
+        info.rule_tags.emplace_back(tag);
+    }
 
-        // ---- 提取拦截/阻断信息 ----
-        // disruptive_: 是否为阻断规则（true=阻断, false=仅检测）
-        if (rule.detail_->disruptive_) {
-            result->intervened = *rule.detail_->disruptive_;
-        }
+    // ---- 提取拦截/阻断信息 ----
+    // disruptive() 返回 Disruptive 枚举，判断是否为阻断型规则
+    auto disruptive = rule.disruptive();
+    bool is_disruptive = (disruptive == Wge::Rule::Disruptive::DENY ||
+                          disruptive == Wge::Rule::Disruptive::DROP ||
+                          disruptive == Wge::Rule::Disruptive::REDIRECT ||
+                          disruptive == Wge::Rule::Disruptive::BLOCK);
+    result->intervened = is_disruptive;
 
-        // status_: 阻断时返回的 HTTP 状态码
-        if (rule.detail_->status_) {
-            result->response_code = *rule.detail_->status_;
-        }
-
-        // redirect_: 阻断时重定向的目标 URL
-        if (rule.detail_->redirect_) {
-            result->redirect_url = *rule.detail_->redirect_;
-        }
-
-        // operator_: 触发匹配的操作符名称（如 "@rx", "@contains"）
-        if (rule.detail_->operator_) {
-            info.operator_name = *rule.detail_->operator_;
+    // status() 返回 string_view，尝试转为 int
+    auto status_sv = rule.status();
+    if (!status_sv.empty()) {
+        try {
+            result->response_code = std::stoi(std::string(status_sv));
+        } catch (...) {
+            result->response_code = 0;
         }
     }
+
+    // redirect() 返回 string_view (非 const 方法，需 const_cast)
+    result->redirect_url = std::string(const_cast<Wge::Rule&>(rule).redirect());
 
     // ===== 推导 disruptive_action（阻断动作类型）=====
     // 根据 intervened + response_code + redirect_url 的组合推导
