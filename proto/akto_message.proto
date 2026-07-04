@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package wge.kafka.akto;
+
+// Akto HttpResponseParam — akto.api.logs2 Topic 的 Protobuf 消息格式
+// 源码: https://github.com/akto-api-security/client-message-transformer
+//       protobuf/traffic_payload/message.proto
+// 此 proto 从 Akto 项目复制，用于消费 akto.api.logs2 Topic
+
+option java_outer_classname = "HttpResponseParamProto";
+
+message StringList {
+  repeated string values = 1;
+}
+
+message HttpResponseParam {
+  string method = 1;
+  string path = 2;
+  string type = 3;
+  map<string, StringList> request_headers = 4 [json_name = "requestHeaders"];
+  string request_payload = 5 [json_name = "requestPayload"];
+  int32 api_collection_id = 6 [json_name = "apiCollectionId"];
+  int32 status_code = 7 [json_name = "statusCode"];
+  string status = 8;
+  map<string, StringList> response_headers = 9 [json_name = "responseHeaders"];
+  string response_payload = 10 [json_name = "responsePayload"];
+  int32 time = 11;
+  string akto_account_id = 12;
+  string ip = 13;
+  string dest_ip = 14 [json_name = "destIp"];
+  string direction = 15;
+  bool is_pending = 16;
+  string source = 17;
+  string akto_vxlan_id = 18;
+}

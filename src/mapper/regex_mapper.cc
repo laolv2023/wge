@@ -467,8 +467,14 @@ int64_t RegexMapper::parseTimestamp(
                     int tz_offset = tz_hour * 3600 + tz_min * 60;
                     if (tz_sign == '-') tz_offset = -tz_offset;
                     result -= static_cast<int64_t>(tz_offset) * 1000;
+                    return result;
                 }
-                return result;
+                // parsed == 7: 匹配到秒但无时区/毫秒
+                // 仅当输入确实无后续时区字符时才返回 UTC
+                if (raw.size() <= 19) {
+                    return result;
+                }
+                // 输入可能有时区 (如 +08:00)，fall through 尝试后续格式
             }
         }
 
@@ -488,6 +494,32 @@ int64_t RegexMapper::parseTimestamp(
                 int64_t ep = static_cast<int64_t>(time_epoch);
                 if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
                 return ep * 1000;
+            }
+        }
+
+        // 尝试无毫秒但有时区格式: 2024-01-15T10:30:00+08:00
+        std::tm tm3 = {};
+        char tz_sign3 = '+';
+        int tz_hour3 = 0, tz_min3 = 0;
+        int parsed3 = std::sscanf(raw.c_str(),
+                                   "%4d-%2d-%2dT%2d:%2d:%2d%c%2d:%2d",
+                                   &tm3.tm_year, &tm3.tm_mon, &tm3.tm_mday,
+                                   &tm3.tm_hour, &tm3.tm_min, &tm3.tm_sec,
+                                   &tz_sign3, &tz_hour3, &tz_min3);
+        if (parsed3 == 9) {
+            tm3.tm_year -= 1900;
+            tm3.tm_mon -= 1;
+            tm3.tm_isdst = -1;
+            errno = 0;
+            auto time_epoch = timegm(&tm3);
+            if (errno == 0) {
+                int64_t ep = static_cast<int64_t>(time_epoch);
+                if (ep > INT64_MAX / 1000 || ep < INT64_MIN / 1000) return 0;
+                int64_t result3 = ep * 1000;
+                int tz_offset = tz_hour3 * 3600 + tz_min3 * 60;
+                if (tz_sign3 == '-') tz_offset = -tz_offset;
+                result3 -= static_cast<int64_t>(tz_offset) * 1000;
+                return result3;
             }
         }
     }

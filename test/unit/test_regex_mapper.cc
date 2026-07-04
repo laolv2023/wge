@@ -378,3 +378,24 @@ TEST(RegexMapperTest, ParseTimestampUnixMilliseconds) {
   auto ts = mapper.parseTimestamp("1696946136000", {});
   EXPECT_GT(ts, 0);
 }
+
+// P2-1 回归测试: ISO 8601 无毫秒但有时区偏移
+TEST(RegexMapperTest, ParseTimestampIso8601WithOffset) {
+  RegexMapper mapper;
+  auto ts = mapper.parseTimestamp("2024-01-15T10:30:00+08:00", {});
+  EXPECT_GT(ts, 0);
+  // +08:00 → UTC 02:30:00, 应比 Z 后缀版本早 8 小时
+  auto ts_utc = mapper.parseTimestamp("2024-01-15T10:30:00Z", {});
+  EXPECT_EQ(ts, ts_utc - 8 * 3600 * 1000)
+      << "Timestamp with +08:00 offset should be 8h earlier than UTC";
+}
+
+// P2-1 回归测试: ISO 8601 无毫秒但有时区偏移 (负偏移)
+TEST(RegexMapperTest, ParseTimestampIso8601WithNegativeOffset) {
+  RegexMapper mapper;
+  auto ts = mapper.parseTimestamp("2024-01-15T10:30:00-05:00", {});
+  EXPECT_GT(ts, 0);
+  auto ts_utc = mapper.parseTimestamp("2024-01-15T10:30:00Z", {});
+  EXPECT_EQ(ts, ts_utc + 5 * 3600 * 1000)
+      << "Timestamp with -05:00 offset should be 5h later than UTC";
+}

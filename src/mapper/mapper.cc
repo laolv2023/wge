@@ -36,6 +36,7 @@
 #include <stdexcept>
 
 #include "http_access.pb.h"
+#include "akto_message.pb.h"
 #include "mapper/field_applier.h"
 #include "mapper/json_mapper.h"
 #include "mapper/regex_mapper.h"
@@ -198,6 +199,92 @@ std::expected<std::shared_ptr<HttpAccessEvent>, std::string> LogMapper::map(
             for (const auto& cf : config_.constant_fields) {
                 impl_->field_applier->applyConstant(*event, cf.target, cf.value);
             }
+            return event;
+        }
+
+        case Format::AktoProtobuf: {
+            // Akto HttpResponseParam protobuf (akto.api.logs2 Topic)
+            // 使用 Akto 标准 proto 反序列化，字段映射到 HttpAccessEvent
+            if (raw_payload.size() > static_cast<size_t>(INT_MAX)) {
+                return std::unexpected(
+                    std::string("Akto Protobuf payload too large: ") +
+                    std::to_string(raw_payload.size()) + " bytes");
+            }
+
+            wge::kafka::akto::HttpResponseParam akto_pb;
+            if (!akto_pb.ParseFromArray(raw_payload.data(),
+                                        static_cast<int>(raw_payload.size()))) {
+                return std::unexpected(
+                    std::string("Failed to parse Akto HttpResponseParam (") +
+                    std::to_string(raw_payload.size()) + " bytes)");
+            }
+
+            // P2-1: HttpResponseParam 无 event_id 字段，留空（由 AlertBuilder 生成 UUID v7）
+            // event->set_event_id(generateUuidV7());  // 在 AlertBuilder 中生成
+
+            // 时间戳: int32 秒 → int64 毫秒
+            event->set_timestamp_ms(static_cast<int64_t>(akto_pb.time()) * 1000);
+
+            // collector_id ← akto_account_id
+            event->set_collector_id(akto_pb.akto_account_id());
+
+            // P2-2: IP 映射
+            event->set_downstream_ip(akto_pb.ip());
+            event->set_upstream_ip(akto_pb.dest_ip());
+            // downstream_port / upstream_port 保持常量注入 = 0
+
+            // 请求信息
+            event->set_request_method(akto_pb.method());
+            event->set_request_uri(akto_pb.path());
+            event->set_request_version(akto_pb.type());
+
+            // P1-1: akto_vxlan_id → collection_id (与 Akto L610 一致)
+            // Akto threat-detection 用 akto_vxlan_id (string) 解析为 int 作为 apiCollectionId
+            event->set_akto_vxlan_id(akto_pb.akto_vxlan_id());
+            event->set_akto_account_id(akto_pb.akto_account_id());
+            int32_t col_id = 0;
+            try {
+                col_id = std::stoi(akto_pb.akto_vxlan_id());
+            } catch (...) {
+                col_id = 0;
+            }
+            event->set_akto_collection_id(col_id);
+
+            // request_headers: map<string, StringList> → repeated Header
+            for (const auto& [key, values] : akto_pb.request_headers()) {
+                for (const auto& val : values.values()) {
+                    auto* h = event->add_request_headers();
+                    h->set_key(key);
+                    h->set_value(val);
+                }
+            }
+
+            // response_headers: 同上
+            for (const auto& [key, values] : akto_pb.response_headers()) {
+                for (const auto& val : values.values()) {
+                    auto* h = event->add_response_headers();
+                    h->set_key(key);
+                    h->set_value(val);
+                }
+            }
+
+            // request_payload / response_payload: 原始 body，直接映射
+            // (Akto 的 rawToJsonString 是消费侧行为，不影响 proto 数据)
+            event->set_request_body(akto_pb.request_payload());
+            event->set_response_body(akto_pb.response_payload());
+
+            // 响应状态
+            event->set_response_status(akto_pb.status_code());
+
+            // 常量字段
+            for (const auto& cf : config_.constant_fields) {
+                impl_->field_applier->applyConstant(*event, cf.target, cf.value);
+            }
+
+            spdlog::debug("LogMapper: Akto HttpResponseParam parsed successfully "
+                          "(method={}, path={}, ip={})",
+                          akto_pb.method(), akto_pb.path(), akto_pb.ip());
+
             return event;
         }
     }

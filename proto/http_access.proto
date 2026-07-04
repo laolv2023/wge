@@ -28,6 +28,11 @@ message HttpAccessEvent {
   repeated Header response_headers = 32;
   bytes   response_body    = 33;
   int64   response_body_length = 34;
+
+  // ---- Akto 扩展字段 (从 HttpResponseParam 映射) ----
+  string  akto_vxlan_id       = 40;  // Akto 用作 apiCollectionId
+  int32   akto_collection_id  = 41;  // 从 akto_vxlan_id 解析
+  string  akto_account_id     = 42;  // Akto 多租户 ID
 }
 
 message Header {

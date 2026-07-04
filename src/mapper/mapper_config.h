@@ -29,10 +29,11 @@ namespace wge::kafka::mapper {
  * @brief 日志格式枚举
  */
 enum class Format : uint8_t {
-    Protobuf = 0,  ///< Protobuf 二进制格式
-    Json = 1,      ///< JSON 文本格式
-    Regex = 2,     ///< 正则表达式命名分组提取
-    Grok = 3,      ///< Grok 模式匹配（类似 Logstash）
+    Protobuf = 0,      ///< Protobuf 二进制格式 (HttpAccessEvent)
+    Json = 1,          ///< JSON 文本格式
+    Regex = 2,         ///< 正则表达式命名分组提取
+    Grok = 3,          ///< Grok 模式匹配（类似 Logstash）
+    AktoProtobuf = 4,  ///< Akto HttpResponseParam protobuf (akto.api.logs2)
 };
 
 /**

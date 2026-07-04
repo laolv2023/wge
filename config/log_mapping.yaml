@@ -1,7 +1,11 @@
 # log_mapping.yaml — Akto API 日志 → HttpAccessEvent 映射配置
 # 适配对象: Akto API Security 平台的 Kafka 输出
-# 输入 Topic: akto.api.logs (JSON) 或 akto.api.logs2 (Protobuf → JSON)
-# 特殊处理: requestHeaders/responseHeaders 为 JSON 字符串, 需 AktoPreprocessor 二次解析
+# 输入 Topic: akto.api.logs (JSON) 或 akto.api.logs2 (Protobuf)
+# 格式选择:
+#   - format: "json"          → 消费 akto.api.logs (JSON 格式)
+#   - format: "akto_protobuf"  → 消费 akto.api.logs2 (Akto HttpResponseParam Protobuf)
+#   - format: "protobuf"       → 消费 HttpAccessEvent Protobuf (WGE 内部格式, 极少使用)
+# 特殊处理: requestHeaders/responseHeaders 为 JSON 字符串, 需 AktoPreprocessor 二次解析 (仅 JSON 格式)
 
 # ===== 全局设置 =====
 mapping:

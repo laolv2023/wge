@@ -31,18 +31,21 @@ std::expected<Format, std::string> parseFormat(std::string_view str) {
     if (lower == "json") return Format::Json;
     if (lower == "regex") return Format::Regex;
     if (lower == "grok") return Format::Grok;
+    if (lower == "akto_protobuf" || lower == "akto-protobuf" || lower == "akto")
+        return Format::AktoProtobuf;
 
     return std::unexpected(
         std::string("Unknown format: '") + std::string(str) +
-        "'. Expected one of: protobuf, json, regex, grok");
+        "'. Expected one of: protobuf, json, regex, grok, akto_protobuf");
 }
 
 const char* formatToString(Format fmt) noexcept {
     switch (fmt) {
-        case Format::Protobuf: return "protobuf";
-        case Format::Json:     return "json";
-        case Format::Regex:    return "regex";
-        case Format::Grok:     return "grok";
+        case Format::Protobuf:     return "protobuf";
+        case Format::Json:         return "json";
+        case Format::Regex:        return "regex";
+        case Format::Grok:         return "grok";
+        case Format::AktoProtobuf: return "akto_protobuf";
     }
     return "unknown";
 }

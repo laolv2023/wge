@@ -431,7 +431,7 @@ int64_t FieldApplier::parseTimestamp(
                 raw.c_str(), "%4d-%2d-%2d%c%2d:%2d:%2d%7s",
                 &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &sep,
                 &tm.tm_hour, &tm.tm_min, &tm.tm_sec, tz_str);
-            if (parsed == 7 && tz_str[0] != '\0') {
+            if (parsed == 8 && tz_str[0] != '\0') {
                 if (tz_str[0] == 'Z' || tz_str[0] == 'z') {
                     parsed = 7;  // UTC 时区，无需额外调整
                 } else {
@@ -586,7 +586,7 @@ std::string FieldApplier::base64Decode(std::string_view encoded) {
     std::string result;
     result.reserve((encoded.size() * 3) / 4);
 
-    int val = 0;
+    unsigned int val = 0;
     int valb = -8;
     for (unsigned char c : encoded) {
         if (c == '=' || c == '\n' || c == '\r' || c == ' ') continue;

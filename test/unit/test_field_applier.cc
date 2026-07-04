@@ -226,6 +226,22 @@ TEST(FieldApplierTest, ParseTimestampIso8601WithOffset) {
   FieldApplier applier;
   auto ts = applier.parseTimestamp("2024-01-15T10:30:00+08:00", {});
   EXPECT_GT(ts, 0);
+  // 验证时区偏移正确应用: +08:00 → UTC 02:30:00
+  // 2024-01-15T10:30:00+08:00 = 2024-01-15T02:30:00Z = 1705295400000 ms
+  // 2024-01-15T10:30:00Z       = 1705324200000 ms (差 8h = 28800000 ms)
+  auto ts_utc = applier.parseTimestamp("2024-01-15T10:30:00Z", {});
+  EXPECT_EQ(ts, ts_utc - 8 * 3600 * 1000)
+      << "Timestamp with +08:00 offset should be 8h earlier than UTC";
+}
+
+TEST(FieldApplierTest, ParseTimestampIso8601WithNegativeOffset) {
+  FieldApplier applier;
+  auto ts = applier.parseTimestamp("2024-01-15T10:30:00-05:00", {});
+  EXPECT_GT(ts, 0);
+  // -05:00 → UTC 15:30:00 (5h later)
+  auto ts_utc = applier.parseTimestamp("2024-01-15T10:30:00Z", {});
+  EXPECT_EQ(ts, ts_utc + 5 * 3600 * 1000)
+      << "Timestamp with -05:00 offset should be 5h later than UTC";
 }
 
 // ============================================================================
@@ -314,6 +330,45 @@ TEST(FieldApplierTest, DecodeBase64) {
 
   // 不含填充的
   EXPECT_EQ(applier.decodeBytes("YQ", "base64"), "a");
+}
+
+// P1-2 回归测试: 长 base64 字符串（>6 字符，触发 int 溢出）
+TEST(FieldApplierTest, DecodeBase64LongString) {
+  FieldApplier applier;
+  // 48 字符 base64 → 36 字节输出，远超 int 32 位溢出点
+  std::string expected(36, 'A');
+  // 手动编码 36 个 'A' → base64
+  // "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" → "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ=="
+  std::string b64 = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ==";
+  std::string decoded = applier.decodeBytes(b64, "base64");
+  EXPECT_EQ(decoded, expected);
+}
+
+// P1-2 回归测试: 超长 base64（100+ 字符）
+TEST(FieldApplierTest, DecodeBase64VeryLongString) {
+  FieldApplier applier;
+  // 100 个 'X' → base64
+  std::string raw_data(100, 'X');
+  // 使用标准 base64 编码
+  static const char b64_chars[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string b64;
+  int val = 0, valb = -6;
+  for (unsigned char c : raw_data) {
+    val = (val << 8) + c;
+    valb += 8;
+    while (valb >= 0) {
+      b64.push_back(b64_chars[(val >> valb) & 0x3F]);
+      valb -= 6;
+    }
+  }
+  if (valb > -6) {
+    b64.push_back(b64_chars[((val << 8) >> (valb + 8)) & 0x3F]);
+  }
+  while (b64.size() % 4) b64.push_back('=');
+
+  std::string decoded = applier.decodeBytes(b64, "base64");
+  EXPECT_EQ(decoded, raw_data);
 }
 
 // ============================================================================
