@@ -1,0 +1,417 @@
+/**
+ * Copyright (c) 2024-2025 Stone Rhino and contributors.
+ *
+ * MIT License (http://opensource.org/licenses/MIT)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+ * associated documentation files (the "Software"), to deal in the Software without restriction,
+ * including without limitation the rights to use, copy, modify, merge, publish, distribute,
+ * sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or
+ * substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+ * NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+#include <format>
+#include <functional>
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <stdlib.h>
+
+#include "action/actions_include.h"
+#include "antlr4/parser.h"
+#include "engine.h"
+#include "transformation/transform_include.h"
+#include "variable/variables_include.h"
+
+namespace Wge {
+namespace Parser {
+class RuleOperatorParseTest : public testing::Test {
+private:
+  // Use for specific the main thread id, so that the ASSERT_IS_MAIN_THREAD macro can work
+  // correctly in the test.
+  Engine main_thread_id_init_helper_;
+};
+
+TEST_F(RuleOperatorParseTest, beginsWith) {
+  const std::string directive =
+      R"(SecRule TX:foo "@beginsWith ba" "id:1,phase:1,setvar:'tx.v1',tag:'foo',msg:'bar'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("beginsWith"));
+  EXPECT_EQ(op->literalValue(), "ba");
+}
+
+TEST_F(RuleOperatorParseTest, beginsWithMacro) {
+  const std::string directive =
+      R"(SecRule TX:foo "@beginsWith %{tx.bar}" "id:1,phase:1,setvar:'tx.v1',tag:'foo',msg:'bar'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("beginsWith"));
+  EXPECT_EQ(op->literalValue(), "");
+  auto& macro = op->macro();
+  ASSERT_NE(macro, nullptr);
+  EXPECT_EQ(macro->literalValue(), "%{TX.bar}");
+}
+
+TEST_F(RuleOperatorParseTest, endsWith) {
+  const std::string directive =
+      R"(SecRule TX:foo "@endsWith ar" "id:1,phase:1,setvar:'tx.v1',tag:'foo',msg:'bar'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("endsWith"));
+  EXPECT_EQ(op->literalValue(), "ar");
+}
+
+TEST_F(RuleOperatorParseTest, endsWithMacro) {
+  const std::string directive =
+      R"(SecRule TX:foo "@endsWith %{tx.bar}" "id:1,phase:1,setvar:'tx.v1',tag:'foo',msg:'bar'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("endsWith"));
+  EXPECT_EQ(op->literalValue(), "");
+  auto& macro = op->macro();
+  ASSERT_NE(macro, nullptr);
+  EXPECT_EQ(macro->literalValue(), "%{TX.bar}");
+}
+
+TEST_F(RuleOperatorParseTest, ipMatch) {
+  const std::string directive =
+      R"(SecRule TX:ipv4 "@ipMatch 192.168.1.1" "id:1,phase:1,setvar:'tx.ipv4_true'"
+  SecRule TX:ipv4 "@ipMatch 192.168.1.0/24" "id:2,phase:1,setvar:'tx.ipv4_mark_true'"
+  SecRule TX:ipv6 "@ipMatch 2001:db8:85a3:8d3:1319:8a2e:370:7349" "id:3,phase:1,setvar:'tx.ipv6_false'"
+  SecRule TX:ipv6 "@ipMatch 2001:db8:85a3:8d3:1319:8a2e:270:0000/24" "id:4,phase:1,setvar:'tx.ipv6_mask_false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rules = parser.rules()[0];
+  EXPECT_EQ(rules.size(), 4);
+  size_t i = 0;
+  for (auto& rule : rules) {
+    auto& op = rule.operators().front();
+    EXPECT_EQ(op->name(), std::string_view("ipMatch"));
+    switch (i) {
+    case 0:
+      EXPECT_EQ(rule.operators().front()->literalValue(), "192.168.1.1");
+      break;
+    case 1:
+      EXPECT_EQ(rule.operators().front()->literalValue(), "192.168.1.0/24");
+      break;
+    case 2:
+      EXPECT_EQ(rule.operators().front()->literalValue(), "2001:db8:85a3:8d3:1319:8a2e:370:7349");
+      break;
+    case 3:
+      EXPECT_EQ(rule.operators().front()->literalValue(),
+                "2001:db8:85a3:8d3:1319:8a2e:270:0000/24");
+      break;
+    default:
+      ASSERT_TRUE(false);
+      break;
+    }
+    ++i;
+  }
+}
+
+TEST_F(RuleOperatorParseTest, pm) {
+  const std::string directive =
+      R"(SecRule TX:foo "@pm hello1 world1" "id:5,phase:1,setvar:'tx.false2'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("pm"));
+  EXPECT_EQ(op->literalValue(), "hello1 world1");
+}
+
+TEST_F(RuleOperatorParseTest, within) {
+  const std::string directive =
+      R"(SecRule TX:foo "@within hello1 world1" "id:5,phase:1,setvar:'tx.false2'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("within"));
+  EXPECT_EQ(op->literalValue(), "hello1 world1");
+}
+
+TEST_F(RuleOperatorParseTest, withinWithMacro) {
+  const std::string directive =
+      R"(SecRule TX:foo "@within %{tx.v5}" "id:5,phase:1,setvar:'tx.false2'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("within"));
+  EXPECT_EQ(op->literalValue(), "");
+  auto& macro = op->macro();
+  ASSERT_NE(macro, nullptr);
+  EXPECT_EQ(macro->literalValue(), "%{TX.v5}");
+}
+
+TEST_F(RuleOperatorParseTest, rx) {
+  const std::string directive =
+      R"(SecRule TX:foo "@rx ^\w+\d+\w+$" "id:1,phase:1,setvar:'tx.true1'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("rx"));
+  EXPECT_EQ(op->literalValue(), R"(^\w+\d+\w+$)");
+}
+
+TEST_F(RuleOperatorParseTest, rxWithMacro) {
+  const std::string directive =
+      R"(SecRule TX:foo "@rx %{tx.hello}" "id:1,phase:1,setvar:'tx.true1'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("rx"));
+  EXPECT_EQ(op->literalValue(), "");
+  auto& macro = op->macro();
+  ASSERT_NE(macro, nullptr);
+  EXPECT_EQ(macro->literalValue(), "%{TX.hello}");
+}
+
+TEST_F(RuleOperatorParseTest, pmFromFile) {
+  const std::string directive =
+      R"(SecRule TX:bar "@pmFromFile test/test_data/pmf_test.data" "id:1,phase:1,setvar:'tx.false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("pmFromFile"));
+  EXPECT_EQ(op->literalValue(), R"(test/test_data/pmf_test.data)");
+}
+
+TEST_F(RuleOperatorParseTest, streq) {
+  const std::string directive =
+      R"(SecRule TX:foo "@streq helloworld1" "id:2,phase:1,setvar:'tx.false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("streq"));
+  EXPECT_EQ(op->literalValue(), "helloworld1");
+}
+
+TEST_F(RuleOperatorParseTest, streqWithMacro) {
+  const std::string directive =
+      R"(SecRule TX:foo "@streq %{tx.hello}" "id:2,phase:1,setvar:'tx.false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("streq"));
+  EXPECT_EQ(op->literalValue(), "");
+  auto& macro = op->macro();
+  ASSERT_NE(macro, nullptr);
+  EXPECT_EQ(macro->literalValue(), "%{TX.hello}");
+}
+
+TEST_F(RuleOperatorParseTest, validateUrlEncoding) {
+  const std::string directive =
+      R"(SecRule TX:bar "@validateUrlEncoding" "id:2,phase:1,setvar:'tx.false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("validateUrlEncoding"));
+  EXPECT_EQ(op->literalValue(), "");
+}
+
+TEST_F(RuleOperatorParseTest, contains) {
+  const std::string directive =
+      R"(SecRule TX:foo "@contains hello1" "id:2,phase:1,setvar:'tx.false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("contains"));
+  EXPECT_EQ(op->literalValue(), "hello1");
+}
+
+TEST_F(RuleOperatorParseTest, containsWithMacro) {
+  const std::string directive =
+      R"(SecRule TX:foo "@contains %{tx.foo}" "id:2,phase:1,setvar:'tx.false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("contains"));
+  EXPECT_EQ(op->literalValue(), "");
+  auto& macro = op->macro();
+  ASSERT_NE(macro, nullptr);
+  EXPECT_EQ(macro->literalValue(), "%{TX.foo}");
+}
+
+TEST_F(RuleOperatorParseTest, validateByteRange) {
+  const std::string directive =
+      R"(SecRule TX:bar "@validateByteRange 65,66-68" "id:2,phase:1,setvar:'tx.false'")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("validateByteRange"));
+  EXPECT_EQ(op->literalValue(), "65,66-68");
+}
+
+TEST_F(RuleOperatorParseTest, xor) {
+  const std::string directive = R"(SecRule TX:foo "@xor 0" "id:2,phase:1")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("xor"));
+  EXPECT_EQ(op->literalValue(), "0");
+}
+
+TEST_F(RuleOperatorParseTest, xorWithMacro) {
+  const std::string directive = R"(SecRule TX:foo "@xor %{tx.bar}" "id:2,phase:1")";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  auto& rule = parser.rules()[0].back();
+  auto& op = rule.operators().front();
+  EXPECT_EQ(op->name(), std::string_view("xor"));
+  EXPECT_EQ(op->literalValue(), "");
+  auto& macro = op->macro();
+  ASSERT_NE(macro, nullptr);
+  EXPECT_EQ(macro->literalValue(), "%{TX.bar}");
+}
+
+TEST_F(RuleOperatorParseTest, operatorCombination) {
+  const std::string directive =
+      R"(
+      SecRule TX:bar "@beginsWith bar|@endsWith ar|@contains %{tx.foo}|@rx %{tx.foo2}" "id:2,phase:1,setvar:'tx.false'"
+      SecRule TX:bar "@beginsWith bar|!@endsWith ar|@contains %{tx.foo}|!@rx %{tx.foo2}" "id:3,phase:2,setvar:'tx.match'"
+      )";
+
+  Antlr4::Parser parser;
+  auto result = parser.load(directive);
+  ASSERT_TRUE(result.has_value());
+
+  {
+    auto& rule = parser.rules()[0].back();
+    auto& operators = rule.operators();
+    ASSERT_EQ(operators.size(), 4);
+    EXPECT_EQ(operators[0]->name(), std::string_view("beginsWith"));
+    EXPECT_EQ(operators[0]->literalValue(), "bar");
+    EXPECT_EQ(operators[0]->isNot(), false);
+    EXPECT_EQ(operators[1]->name(), std::string_view("endsWith"));
+    EXPECT_EQ(operators[1]->literalValue(), "ar");
+    EXPECT_EQ(operators[1]->isNot(), false);
+    EXPECT_EQ(operators[2]->name(), std::string_view("contains"));
+    EXPECT_EQ(operators[2]->literalValue(), "");
+    EXPECT_EQ(operators[2]->isNot(), false);
+    auto& macro = operators[2]->macro();
+    ASSERT_NE(macro, nullptr);
+    EXPECT_EQ(macro->literalValue(), "%{TX.foo}");
+    {
+      EXPECT_EQ(operators[3]->name(), std::string_view("rx"));
+      EXPECT_EQ(operators[3]->literalValue(), "");
+      EXPECT_EQ(operators[3]->isNot(), false);
+      auto& macro = operators[3]->macro();
+      ASSERT_NE(macro, nullptr);
+      EXPECT_EQ(macro->literalValue(), "%{TX.foo2}");
+    }
+  }
+  {
+    auto& rule = parser.rules()[1].back();
+    auto& operators = rule.operators();
+    ASSERT_EQ(operators.size(), 4);
+    EXPECT_EQ(operators[0]->name(), std::string_view("beginsWith"));
+    EXPECT_EQ(operators[0]->literalValue(), "bar");
+    EXPECT_EQ(operators[0]->isNot(), false);
+    EXPECT_EQ(operators[1]->name(), std::string_view("endsWith"));
+    EXPECT_EQ(operators[1]->literalValue(), "ar");
+    EXPECT_EQ(operators[1]->isNot(), true);
+    EXPECT_EQ(operators[2]->name(), std::string_view("contains"));
+    EXPECT_EQ(operators[2]->literalValue(), "");
+    EXPECT_EQ(operators[2]->isNot(), false);
+    auto& macro = operators[2]->macro();
+    ASSERT_NE(macro, nullptr);
+    EXPECT_EQ(macro->literalValue(), "%{TX.foo}");
+    {
+      EXPECT_EQ(operators[3]->name(), std::string_view("rx"));
+      EXPECT_EQ(operators[3]->literalValue(), "");
+      EXPECT_EQ(operators[3]->isNot(), true);
+      auto& macro = operators[3]->macro();
+      ASSERT_NE(macro, nullptr);
+      EXPECT_EQ(macro->literalValue(), "%{TX.foo2}");
+    }
+  }
+}
+} // namespace Parser
+} // namespace Wge

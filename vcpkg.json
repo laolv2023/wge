@@ -1,0 +1,16 @@
+{
+  "dependencies": [
+    "antlr4",
+    "spdlog",
+    "gtest",
+    "pcre2",
+    "re2",
+    "gperftools",
+    "hyperscan",
+    "libinjection",
+    "libxml2",
+    "boost-uuid",
+    "boost-unordered",
+    "boost-interprocess"
+  ]
+}

