@@ -10,8 +10,10 @@
  * 线程安全: 所有方法为静态纯函数，不访问共享状态，天然线程安全。
  */
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace wge::kafka {
 
@@ -65,12 +67,22 @@ public:
         const std::string& request_method,
         const std::string& request_uri,
         const std::string& downstream_ip,
-        const std::string& upstream_ip);
+        const std::string& upstream_ip,
+        // Akto 透传字段 (从 HttpAccessEvent 透传)
+        const std::string& akto_account_id = "",
+        int32_t akto_collection_id = 0,
+        const std::string& request_body = "",
+        int32_t response_status_code = 0,
+        const std::string& request_host = "");
 
     /// @brief 禁止实例化
     AlertBuilder() = delete;
 
 private:
+    /// @brief 从 operator_name / rule_tags 推断攻击类型 (Akto sub_category)
+    [[nodiscard]] static std::string inferAttackType(
+        const std::string& operator_name,
+        const std::vector<std::string>& rule_tags);
     /**
      * @brief 生成 UUID v7 (timestamp-ordered UUID)
      *

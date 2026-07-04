@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package threat_detection.message.malicious_event.v1;
+
+// Akto MaliciousEventKafkaEnvelope — akto.threat_detection.malicious_events Topic
+// 源码: https://github.com/akto-api-security/akto
+//       protobuf/threat_detection/message/malicious_event/v1/message.proto
+// 此 proto 从 Akto 项目复制，用于输出 Akto 消费者期望的 Protobuf 格式。
+// SendMaliciousEventsToBackend.java L37:
+//   MaliciousEventKafkaEnvelope.parseFrom(record.value())
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_SINGLE = 1;
+  EVENT_TYPE_AGGREGATED = 2;
+}
+
+message OwaspCategory {
+  string id = 1;
+  string name = 2;
+  string severity = 3;
+  string confidence = 4;
+}
+
+message Metadata {
+  // 简化定义，WGE 不使用此字段
+}
+
+message MaliciousEventMessage {
+  string actor = 1;
+  string filter_id = 2;
+  int64 detected_at = 3;        // 毫秒级时间戳
+  string latest_api_ip = 4;
+  string latest_api_endpoint = 5;
+  string latest_api_method = 6;
+  int32 latest_api_collection_id = 7;
+  string latest_api_payload = 8;
+  EventType event_type = 9;
+  string category = 10;
+  string sub_category = 11;
+  string severity = 12;
+  string type = 13;
+  Metadata metadata = 14;
+  bool successful_exploit = 15;
+  string label = 16;
+  string host = 17;
+  string status = 18;
+  string context_source = 19;
+  string session_id = 20;
+  repeated OwaspCategory owasp_categories = 21;
+}
+
+message MaliciousEventKafkaEnvelope {
+  string account_id = 1;
+  string actor = 2;
+  MaliciousEventMessage malicious_event = 3;
+}

@@ -133,9 +133,14 @@ public:
      *   4. 强制打标: context_source="API", label="THREAT"
      *   5. api_collection_id 防0: 为0时用 Host 兜底, 兜底失败则丢弃
      *
+     * @deprecated 转换逻辑已移至 AlertProducer::serializeAlert()，
+     *   直接输出 MaliciousEventKafkaEnvelope Protobuf 格式。
+     *   此方法仅保留用于测试和向后兼容，不再在生产路径中调用。
+     *
      * @param alert_json WgeAlertEvent 的 JSON 字符串
      * @return Akto 格式 JSON 字符串, 若被过滤则返回空字符串
      */
+    [[deprecated("转换逻辑已移至 AlertProducer::serializeAlert()")]]
     std::string convert(const std::string& alert_json);
 
 private:

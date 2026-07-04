@@ -35,6 +35,7 @@
 #include "librdkafka/rdkafkacpp.h"
 #include "spdlog/spdlog.h"
 #include "wge_alert.pb.h"
+#include "malicious_event.pb.h"  // Akto MaliciousEventKafkaEnvelope
 
 namespace wge::kafka {
 
@@ -293,10 +294,49 @@ size_t AlertProducer::drainQueue(
 }
 
 std::string AlertProducer::serializeAlert(const WgeAlertEvent& alert) const {
+    // WgeAlertEvent → MaliciousEventKafkaEnvelope 转换
+    //
+    // 源码实证: Akto SendMaliciousEventsToBackend.java L37
+    //   envelope = MaliciousEventKafkaEnvelope.parseFrom(r.value());
+    // 必须输出 MaliciousEventKafkaEnvelope Protobuf 格式，
+    // 否则 Akto 解析时字段全部错乱 (WgeAlertEvent 与 MaliciousEventKafkaEnvelope
+    // 的 field number 完全不同)。
+
+    using namespace threat_detection::message::malicious_event::v1;
+
+    MaliciousEventKafkaEnvelope envelope;
+    envelope.set_account_id(alert.akto_account_id());
+    envelope.set_actor(alert.downstream_ip());
+
+    auto* evt = envelope.mutable_malicious_event();
+    evt->set_actor(alert.downstream_ip());
+
+    // filter_id: WGE_ + alert_id 前8位 (与 AktoAdapter 一致)
+    const std::string& aid = alert.alert_id();
+    evt->set_filter_id("WGE_" + aid.substr(0, std::min<size_t>(8, aid.size())));
+
+    // detected_at: WgeAlertEvent.timestamp_ms 已是毫秒，直接映射
+    evt->set_detected_at(alert.timestamp_ms());
+
+    evt->set_latest_api_ip(alert.downstream_ip());
+    evt->set_latest_api_endpoint(alert.request_uri());
+    evt->set_latest_api_method(alert.request_method());
+    evt->set_latest_api_collection_id(alert.akto_collection_id());
+    evt->set_latest_api_payload(alert.request_body());
+    evt->set_event_type(EventType::EVENT_TYPE_SINGLE);
+    evt->set_category("ApiAbuse");
+    evt->set_sub_category(alert.attack_type());
+    evt->set_severity(alert.severity());
+    evt->set_successful_exploit(alert.successful_exploit());
+    evt->set_label(alert.label().empty() ? "THREAT" : alert.label());
+    evt->set_host(alert.request_host());
+    evt->set_status(alert.response_status());
+    evt->set_context_source(alert.context_source().empty() ? "API" : alert.context_source());
+
     std::string serialized;
-    if (!alert.SerializeToString(&serialized)) {
+    if (!envelope.SerializeToString(&serialized)) {
         throw std::runtime_error(
-            "Failed to serialize WgeAlertEvent (alert_id=" +
+            "Failed to serialize MaliciousEventKafkaEnvelope (alert_id=" +
             alert.alert_id() + ")");
     }
     return serialized;

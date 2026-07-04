@@ -20,6 +20,7 @@
 
 #include "detector/worker_pool.h"
 
+#include <cctype>
 #include <chrono>
 #include <stdexcept>
 #include <string_view>
@@ -31,6 +32,31 @@
 #include "kafka/producer.h"
 #include "metrics/metrics.h"
 #include "spdlog/spdlog.h"
+
+// ============================================================================
+// 辅助函数: 从 HttpAccessEvent.request_headers 提取 Host header
+// ============================================================================
+
+namespace {
+
+/// @brief 从 protobuf repeated Header 中提取 Host header 值 (大小写不敏感)
+std::string extractHostFromHeaders(
+    const google::protobuf::RepeatedPtrField<wge::kafka::Header>& headers) {
+    for (const auto& h : headers) {
+        const std::string& key = h.key();
+        // 大小写不敏感比较
+        if (key.size() == 4 &&
+            std::tolower(key[0]) == 'h' &&
+            std::tolower(key[1]) == 'o' &&
+            std::tolower(key[2]) == 's' &&
+            std::tolower(key[3]) == 't') {
+            return h.value();
+        }
+    }
+    return "";
+}
+
+} // anonymous namespace
 
 // WGE SDK 头文件 (真实 SDK)
 #include "engine.h"
@@ -163,7 +189,13 @@ void WgeWorkerPool::stop() {
                     event->request_method(),
                     event->request_uri(),
                     event->downstream_ip(),
-                    event->upstream_ip());
+                    event->upstream_ip(),
+                    // Akto 透传字段
+                    event->akto_account_id(),
+                    event->akto_collection_id(),
+                    event->request_body(),
+                    event->response_status(),
+                    extractHostFromHeaders(event->request_headers()));
                 producer_.sendAlert(std::move(alert));
                 metrics_.incrementAlertsProduced();
             }
@@ -321,7 +353,13 @@ void WgeWorkerPool::workerLoop(int worker_id) {
                     event->request_method(),
                     event->request_uri(),
                     event->downstream_ip(),
-                    event->upstream_ip());
+                    event->upstream_ip(),
+                    // Akto 透传字段
+                    event->akto_account_id(),
+                    event->akto_collection_id(),
+                    event->request_body(),
+                    event->response_status(),
+                    extractHostFromHeaders(event->request_headers()));
 
                 producer_.sendAlert(std::move(alert));
                 metrics_.incrementAlertsProduced();

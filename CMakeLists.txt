@@ -28,6 +28,7 @@ set(PROTO_FILES
     ${PROTO_DIR}/http_access.proto
     ${PROTO_DIR}/wge_alert.proto
     ${PROTO_DIR}/akto_message.proto
+    ${PROTO_DIR}/malicious_event.proto
 )
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILES})
 target_include_directories(protobuf::libprotobuf INTERFACE ${CMAKE_BINARY_DIR})

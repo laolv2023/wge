@@ -101,7 +101,13 @@ std::shared_ptr<WgeAlertEvent> AlertBuilder::build(
     const std::string& request_method,
     const std::string& request_uri,
     const std::string& downstream_ip,
-    const std::string& upstream_ip) {
+    const std::string& upstream_ip,
+    // Akto 透传字段
+    const std::string& akto_account_id,
+    int32_t akto_collection_id,
+    const std::string& request_body,
+    int32_t response_status_code,
+    const std::string& request_host) {
 
     if (event_id.empty()) {
         throw std::runtime_error("AlertBuilder::build: event_id is empty");
@@ -155,10 +161,96 @@ std::shared_ptr<WgeAlertEvent> AlertBuilder::build(
         matched_rule->set_operator_param(mr.operator_param);
     }
 
-    SPDLOG_DEBUG("AlertBuilder: built alert_id={}, event_id={}, matched_rules={}",
-                 alert->alert_id(), event_id, result.matched_rules.size());
+    // ---- Akto 集成字段 (透传 + 推断) ----
+    alert->set_akto_account_id(akto_account_id);
+    alert->set_akto_collection_id(akto_collection_id);
+    alert->set_request_body(request_body);
+    if (response_status_code > 0) {
+        alert->set_response_status(std::to_string(response_status_code));
+    }
+    alert->set_request_host(request_host);
+
+    // 从 matched_rules 推断 attack_type 和 severity
+    // 优先使用 operator_name 映射，其次从 rule_tags 推断
+    if (!result.matched_rules.empty()) {
+        const auto& first_rule = result.matched_rules[0];
+        std::string attack_type = inferAttackType(
+            first_rule.operator_name, first_rule.rule_tags);
+        alert->set_attack_type(attack_type);
+        alert->set_severity(first_rule.rule_severity);
+    } else {
+        alert->set_attack_type("SecurityMisconfig");
+        alert->set_severity("MEDIUM");
+    }
+
+    alert->set_successful_exploit(false);  // 保守判定
+    alert->set_context_source("API");
+    alert->set_label("THREAT");
+
+    SPDLOG_DEBUG("AlertBuilder: built alert_id={}, event_id={}, matched_rules={}, "
+                 "attack_type={}, akto_account={}",
+                 alert->alert_id(), event_id, result.matched_rules.size(),
+                 alert->attack_type(), akto_account_id);
 
     return alert;
+}
+
+// ============================================================================
+// inferAttackType — 从 operator_name / rule_tags 推断攻击类型
+// ============================================================================
+
+std::string AlertBuilder::inferAttackType(
+    const std::string& operator_name,
+    const std::vector<std::string>& rule_tags) {
+    // 1. 从 operator_name 推断
+    // WGE 操作符: @detectSQLi, @detectXSS, @rx, @pm, @contains 等
+    if (operator_name.find("detectSQLi") != std::string::npos ||
+        operator_name.find("detectSqli") != std::string::npos) {
+        return "SQLInjection";
+    }
+    if (operator_name.find("detectXSS") != std::string::npos ||
+        operator_name.find("detectXss") != std::string::npos) {
+        return "XSS";
+    }
+
+    // 2. 从 rule_tags 推断 (OWASP CRS tag 格式: attack-sqli, attack-xss 等)
+    for (const auto& tag : rule_tags) {
+        if (tag.find("sqli") != std::string::npos ||
+            tag.find("sql-injection") != std::string::npos) {
+            return "SQLInjection";
+        }
+        if (tag.find("xss") != std::string::npos) {
+            return "XSS";
+        }
+        if (tag.find("lfi") != std::string::npos ||
+            tag.find("local-file-inclusion") != std::string::npos) {
+            return "LocalFileInclusionLFIRFI";
+        }
+        if (tag.find("rfi") != std::string::npos ||
+            tag.find("remote-file-inclusion") != std::string::npos) {
+            return "LocalFileInclusionLFIRFI";
+        }
+        if (tag.find("rce") != std::string::npos ||
+            tag.find("command-injection") != std::string::npos ||
+            tag.find("os-command") != std::string::npos) {
+            return "OSCommandInjection";
+        }
+        if (tag.find("ssrf") != std::string::npos) {
+            return "SSRF";
+        }
+        if (tag.find("xxe") != std::string::npos) {
+            return "XXE";
+        }
+    }
+
+    // 3. 从 operator_name 通用模式推断
+    if (operator_name.find("rx") != std::string::npos) {
+        // @rx 是通用正则匹配，无法确定具体类型
+        return "SecurityMisconfig";
+    }
+
+    // 4. 兜底
+    return "SecurityMisconfig";
 }
 
 }  // namespace wge::kafka::detector
