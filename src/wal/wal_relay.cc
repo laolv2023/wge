@@ -74,7 +74,7 @@ int base64CharValue(char c) {
 
 /// @brief base64 解码
 /// 处理标准 base64（含 '=' 填充），忽略空白字符
-std::string base64Decode(const std::string& input) {
+[[maybe_unused]] std::string base64Decode(const std::string& input) {
     std::string output;
     output.reserve((input.size() * 3) / 4);  // 预估输出大小
 

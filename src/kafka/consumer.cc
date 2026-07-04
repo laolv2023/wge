@@ -63,7 +63,7 @@ void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
 /**
  * @brief 设置 RdKafka Conf 整型属性，失败时抛出异常
  */
-void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
+[[maybe_unused]] void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
                     int32_t value) {
     setConfOrThrow(conf, key, std::to_string(value));
 }
@@ -71,7 +71,7 @@ void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
 /**
  * @brief 设置 RdKafka Conf 整型属性 (int64_t)
  */
-void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
+[[maybe_unused]] void setConfOrThrow(RdKafka::Conf* conf, const std::string& key,
                     int64_t value) {
     setConfOrThrow(conf, key, std::to_string(value));
 }
@@ -280,7 +280,7 @@ int64_t KafkaConsumer::consumerLag() const {
         int64_t high = -1;    // 高水位（最新 offset + 1）
         RdKafka::ErrorCode watermark_err =
             consumer_->get_watermark_offsets(
-                tp->topic(), tp->partition(), &low, &high, 5000);
+                tp->topic(), tp->partition(), &low, &high);
 
         // 3. 计算 lag = 高水位 - 已提交 offset
         if (watermark_err == RdKafka::ERR_NO_ERROR && high >= 0) {

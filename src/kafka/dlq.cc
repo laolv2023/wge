@@ -157,7 +157,7 @@ bool DeadLetterQueue::sendRaw(const RdKafka::Message& msg,
     DeadLetterEvent event;
 
     // 原始 topic (从 msg 获取)
-    if (msg.topic_name()) {
+    if (!msg.topic_name().empty()) {
         event.set_original_topic(msg.topic_name());
     }
     event.set_original_partition(msg.partition());

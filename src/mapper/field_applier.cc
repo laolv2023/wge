@@ -573,9 +573,6 @@ int FieldApplier::hexCharToNibble(char c) noexcept {
 }
 
 std::string FieldApplier::base64Decode(std::string_view encoded) {
-    static const char kBase64Table[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
     // 实际使用 std::find 方式
     auto decode_char = [](unsigned char c) -> int {
         if (c >= 'A' && c <= 'Z') return c - 'A';

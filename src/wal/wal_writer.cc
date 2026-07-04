@@ -260,7 +260,6 @@ std::string base64Encode(const std::string& input) {
     std::string output;
     output.reserve(((input.size() + 2) / 3) * 4);
 
-    size_t i = 0;
     unsigned char buf3[3];
     for (auto it = input.begin(); it != input.end(); ) {
         int len = 0;

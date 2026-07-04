@@ -56,7 +56,6 @@ public:
     [[nodiscard]] static std::expected<AppConfig, std::string>
     reload(const AppConfig& base, const std::string& path);
 
-private:
     /**
      * @brief 环境变量替换
      *
@@ -69,6 +68,7 @@ private:
      */
     [[nodiscard]] static std::string substituteEnvVars(const std::string& value);
 
+private:
     /**
      * @brief 验证必填字段
      *

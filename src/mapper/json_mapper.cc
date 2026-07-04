@@ -48,42 +48,33 @@ namespace {
  * @return 字符串表示
  */
 std::string simdjsonValueToString(simdjson::ondemand::value element) {
-    using namespace simdjson;
+    using namespace simdjson::ondemand;
     std::string result;
 
     switch (element.type()) {
-        case simdjson_type::string: {
+        case json_type::string: {
             auto r = element.get_string();
             if (r.error()) return "";
             std::string_view sv = r.value();
             result.assign(sv.data(), sv.size());
             break;
         }
-        case simdjson_type::int64: {
-            auto r = element.get_int64();
-            if (r.error()) return "";
-            result = std::to_string(r.value());
-            break;
+        case json_type::number: {
+            auto ri = element.get_int64();
+            if (!ri.error()) { result = std::to_string(ri.value()); break; }
+            auto ru = element.get_uint64();
+            if (!ru.error()) { result = std::to_string(ru.value()); break; }
+            auto rd = element.get_double();
+            if (!rd.error()) { result = std::to_string(rd.value()); break; }
+            return "";
         }
-        case simdjson_type::uint64: {
-            auto r = element.get_uint64();
-            if (r.error()) return "";
-            result = std::to_string(r.value());
-            break;
-        }
-        case simdjson_type::double_type: {
-            auto r = element.get_double();
-            if (r.error()) return "";
-            result = std::to_string(r.value());
-            break;
-        }
-        case simdjson_type::boolean: {
+        case json_type::boolean: {
             auto r = element.get_bool();
             if (r.error()) return "";
             result = r.value() ? "true" : "false";
             break;
         }
-        case simdjson_type::null_value: {
+        case json_type::null: {
             result = "";
             break;
         }
@@ -181,7 +172,8 @@ std::expected<std::string, std::string> JsonMapper::extractJsonPath(
     simdjson::ondemand::value current;
 
     // 第一步：迭代解析（零拷贝，返回的 string_view 指向原始 buffer）
-    auto error = parser.iterate(raw_payload).get(doc);
+    simdjson::padded_string padded_payload(raw_payload);
+    auto error = parser.iterate(padded_payload).get(doc);
     if (error) {
         return std::unexpected(
             std::string("JSON parse error: ") +
@@ -416,7 +408,8 @@ void JsonMapper::extractEmbeddedHeaders(std::string_view raw_payload,
     simdjson::ondemand::document doc;
     simdjson::ondemand::value current;
 
-    auto error = parser.iterate(raw_payload).get(doc);
+    simdjson::padded_string padded_payload(raw_payload);
+    auto error = parser.iterate(padded_payload).get(doc);
     if (error) {
         spdlog::warn("Failed to parse JSON for embedded headers: {}",
                      simdjson::error_message(error));
@@ -497,7 +490,8 @@ void JsonMapper::extractPrefixHeaders(std::string_view raw_payload,
     simdjson::ondemand::document doc;
     simdjson::ondemand::object root_obj;
 
-    auto error = parser.iterate(raw_payload).get(doc);
+    simdjson::padded_string padded_payload(raw_payload);
+    auto error = parser.iterate(padded_payload).get(doc);
     if (error) {
         spdlog::warn("Failed to parse JSON for prefix headers: {}",
                      simdjson::error_message(error));

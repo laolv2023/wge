@@ -305,7 +305,7 @@ void DetectorService::onConsumerBatch(
     // 提交到 Worker Pool
     if (!events.empty()) {
         try {
-            int64_t submitted = pool_.submitBatch(std::move(events));
+            [[maybe_unused]] int64_t submitted = pool_.submitBatch(std::move(events));
             SPDLOG_DEBUG("DetectorService: submitted {} events to worker pool",
                          submitted);
         } catch (const std::exception& e) {

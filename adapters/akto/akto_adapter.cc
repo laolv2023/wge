@@ -124,7 +124,8 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
     simdjson::ondemand::parser parser;
     simdjson::ondemand::document doc;
 
-    auto error = parser.parse(alert_json).get(doc);
+    simdjson::padded_string padded_json(alert_json);
+    auto error = parser.iterate(padded_json).get(doc);
     if (error) {
         spdlog::warn("[akto_adapter] JSON parse failed: {}", simdjson::error_message(error));
         // 发送到 DLQ，避免数据丢失
@@ -142,19 +143,27 @@ std::string AktoAdapter::convert(const std::string& alert_json) {
     bool successful_exploit = false;
 
     try {
-        doc.get_string("alert_id").get(alert_id);
-        doc.get_int64("timestamp_ms").get(timestamp_ms);
-        doc.get_string("attack_type").get(attack_type);
-        doc.get_string("severity").get(severity);
-        doc.get_string("request_method").get(request_method);
-        doc.get_string("request_uri").get(request_uri);
-        doc.get_string("downstream_ip").get(downstream_ip);
-        doc.get_string("akto_account_id").get(akto_account_id);
-        doc.get_int64("akto_collection_id").get(akto_collection_id);
-        doc.get_string("request_host").get(request_host);
-        doc.get_string("request_body").get(request_body);
-        doc.get_string("response_status").get(response_status);
-        doc.get_bool("successful_exploit").get(successful_exploit);
+        // 使用 simdjson ondemand API: doc["key"].get_string(output)
+        std::string_view sv;
+        if (!doc["alert_id"].get_string().get(sv)) alert_id = sv;
+        if (!doc["timestamp_ms"].get_int64().get(timestamp_ms)) {}
+        if (!doc["attack_type"].get_string().get(sv)) attack_type = sv;
+        if (!doc["severity"].get_string().get(sv)) severity = sv;
+        if (!doc["request_method"].get_string().get(sv)) request_method = sv;
+        if (!doc["request_uri"].get_string().get(sv)) request_uri = sv;
+        if (!doc["downstream_ip"].get_string().get(sv)) downstream_ip = sv;
+        if (!doc["akto_account_id"].get_string().get(sv)) akto_account_id = sv;
+        int64_t collection_id_tmp = 0;
+        if (!doc["akto_collection_id"].get_int64().get(collection_id_tmp)) {
+            akto_collection_id = static_cast<int32_t>(collection_id_tmp);
+        }
+        if (!doc["request_host"].get_string().get(sv)) request_host = sv;
+        if (!doc["request_body"].get_string().get(sv)) request_body = sv;
+        if (!doc["response_status"].get_string().get(sv)) response_status = sv;
+        bool exploit_tmp = false;
+        if (!doc["successful_exploit"].get_bool().get(exploit_tmp)) {
+            successful_exploit = exploit_tmp;
+        }
     } catch (const simdjson::simdjson_error& e) {
         // 部分字段可能不存在, 继续
         spdlog::debug("[akto_adapter] Partial field extraction error: {}", e.what());

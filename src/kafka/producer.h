@@ -21,12 +21,7 @@
 #include <thread>
 #include <vector>
 
-// 前向声明
-namespace RdKafka {
-class Producer;
-class ConsumerGroupMetadata;
-class TopicPartition;
-}  // namespace RdKafka
+#include <librdkafka/rdkafkacpp.h>
 
 namespace wge::kafka {
 

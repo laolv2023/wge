@@ -19,13 +19,7 @@
 #include <thread>
 #include <vector>
 
-// 前向声明 RdKafka 类型
-namespace RdKafka {
-class KafkaConsumer;
-class Message;
-class TopicPartition;
-class ConsumerGroupMetadata;
-}  // namespace RdKafka
+#include <librdkafka/rdkafkacpp.h>
 
 namespace wge::kafka {
 

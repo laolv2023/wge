@@ -24,6 +24,7 @@
 #include <charconv>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>

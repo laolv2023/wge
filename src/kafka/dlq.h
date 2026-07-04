@@ -18,6 +18,7 @@
 namespace RdKafka {
 class Producer;
 class Message;
+class Conf;
 }  // namespace RdKafka
 
 namespace wge::kafka {

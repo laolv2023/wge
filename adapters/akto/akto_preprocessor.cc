@@ -56,14 +56,15 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
 
     // ── 步骤 1: 解析原始 JSON ──
     ondemand::parser parser;
-    auto doc_result = parser.iterate(raw_json);
+    simdjson::padded_string padded_raw(raw_json);
+    auto doc_result = parser.iterate(padded_raw);
     if (doc_result.error()) {
         return std::unexpected(
             "AktoPreprocessor: failed to parse raw JSON: " +
             std::string(error_message(doc_result.error())));
     }
     // 安全获取 document: 使用 value() 而非 value_unsafe()
-    ondemand::document doc = doc_result.value();
+    ondemand::document& doc = doc_result.value();
 
     // ── 步骤 2: 获取 JSON 对象 ──
     ondemand::object obj;
@@ -111,9 +112,6 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
                 out << "[]";
             } else {
                 // 不是字符串 (可能已经是对象或 null), 回退处理
-                // 尝试按对象处理, 否则输出原值
-                auto value_doc = field.value().get_value();
-                (void)value_doc;  // 保持编译器安静
                 out << "[]";
             }
             continue;
@@ -156,14 +154,19 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
         }
 
         // ── 普通字段: 按类型序列化 ──
-        auto value_type = field.value().type();
+        auto type_result = field.value().type();
+        if (type_result.error()) continue;
+        auto value_type = type_result.value();
         switch (value_type) {
         case ondemand::json_type::string: {
             std::string_view sv;
-            field.value().get_string().get(sv);
-            out << "\"";
-            escapeJsonStringTo(out, sv);
-            out << "\"";
+            if (!field.value().get_string().get(sv)) {
+                out << "\"";
+                escapeJsonStringTo(out, sv);
+                out << "\"";
+            } else {
+                out << "\"\"";
+            }
             break;
         }
         case ondemand::json_type::number: {
@@ -186,8 +189,11 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
         }
         case ondemand::json_type::boolean: {
             bool b = false;
-            field.value().get_bool().get(b);
-            out << (b ? "true" : "false");
+            if (!field.value().get_bool().get(b)) {
+                out << (b ? "true" : "false");
+            } else {
+                out << "false";
+            }
             break;
         }
         case ondemand::json_type::null:
@@ -195,7 +201,7 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
             break;
         case ondemand::json_type::object: {
             // 嵌入式 JSON 对象: 直接序列化
-            auto val_result = field.value().get_value();
+            auto val_result = field.value();
             if (val_result.error()) {
                 out << "null";
             } else {
@@ -210,7 +216,7 @@ AktoPreprocessor::preprocess(std::string_view raw_json) {
         }
         case ondemand::json_type::array: {
             // 嵌入式 JSON 数组: 直接序列化
-            auto val_result = field.value().get_value();
+            auto val_result = field.value();
             if (val_result.error()) {
                 out << "null";
             } else {
@@ -247,14 +253,15 @@ AktoPreprocessor::expandHeaderJsonString(std::string_view header_json_str) {
     // 输出: [{"key":"Accept","value":"application/json"},{"key":"Host","value":"example.com"}]
 
     ondemand::parser parser;
-    auto doc_result = parser.iterate(header_json_str);
+    simdjson::padded_string padded_header(header_json_str);
+    auto doc_result = parser.iterate(padded_header);
     if (doc_result.error()) {
         return std::unexpected(
             "expandHeaderJsonString: failed to parse header JSON: " +
             std::string(error_message(doc_result.error())));
     }
     // 安全获取 document: 使用 value() 而非 value_unsafe()
-    ondemand::document doc = doc_result.value();
+    ondemand::document& doc = doc_result.value();
 
     ondemand::object header_obj;
     auto obj_err = doc.get_object().get(header_obj);

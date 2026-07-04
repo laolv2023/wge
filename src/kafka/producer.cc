@@ -74,6 +74,19 @@ void setConfIfNotEmpty(RdKafka::Conf* conf, const std::string& key,
 }
 
 /**
+ * @brief 将 RdKafka::Error* 转换为 ErrorCode 并释放 Error 对象
+ *
+ * librdkafka 的事务 API 返回 Error* 而非 ErrorCode，
+ * 此辅助函数统一转换为 ErrorCode 以便复用现有错误处理逻辑。
+ */
+RdKafka::ErrorCode errorToCode(RdKafka::Error* err) {
+    if (!err) return RdKafka::ERR_NO_ERROR;
+    RdKafka::ErrorCode code = err->code();
+    delete err;
+    return code;
+}
+
+/**
  * @brief 检查 RdKafka ErrorCode，非 NO_ERROR 则抛出异常
  * @param err     RdKafka 错误码
  * @param context 错误上下文描述（用于异常消息）
@@ -179,7 +192,7 @@ void AlertProducer::initTransactions() {
         return;
     }
 
-    RdKafka::ErrorCode err = producer_->init_transactions(30000);  // 30s timeout
+    RdKafka::ErrorCode err = errorToCode(producer_->init_transactions(30000));  // 30s timeout
     checkError(err, "init_transactions failed");
 
     SPDLOG_INFO("AlertProducer: transactions initialized (txn_id={})",
@@ -297,7 +310,7 @@ void AlertProducer::flushLoopImpl(
     // 主循环：定期从队列中取批量告警发送
     while (!stopped_.load(std::memory_order_acquire)) {
         std::vector<std::shared_ptr<WgeAlertEvent>> batch;
-        size_t batch_size = 0;
+        [[maybe_unused]] size_t batch_size = 0;
 
         // ===== 等待消息到达或超时 (linger_ms) =====
         {
@@ -346,7 +359,7 @@ void AlertProducer::flushLoopImpl(
             if (has_transaction) {
                 // 1. 开始事务
                 RdKafka::ErrorCode begin_err =
-                    producer_->begin_transaction();
+                    errorToCode(producer_->begin_transaction());
                 if (begin_err != RdKafka::ERR_NO_ERROR) {
                     SPDLOG_ERROR("begin_transaction failed: {}",
                                  RdKafka::err2str(begin_err));
@@ -410,9 +423,10 @@ void AlertProducer::flushLoopImpl(
                 if (group_metadata) {
                     // send_offsets_to_transaction: 将 consumer offset 纳入事务
                     // 保证 "消费 → 检测 → 告警 → 提交 offset" 原子性
+                    std::vector<RdKafka::TopicPartition*> offsets;
                     RdKafka::ErrorCode offset_err =
-                        producer_->send_offsets_to_transaction(
-                            group_metadata, 30'000);
+                        errorToCode(producer_->send_offsets_to_transaction(
+                            offsets, group_metadata, 30'000));
                     if (offset_err != RdKafka::ERR_NO_ERROR) {
                         SPDLOG_ERROR(
                             "send_offsets_to_transaction failed: {}",
@@ -424,7 +438,7 @@ void AlertProducer::flushLoopImpl(
 
                 // 提交事务（两阶段提交的 commit 阶段）
                 RdKafka::ErrorCode commit_err =
-                    producer_->commit_transaction(30'000);
+                    errorToCode(producer_->commit_transaction(30'000));
                 if (commit_err != RdKafka::ERR_NO_ERROR) {
                     SPDLOG_ERROR("commit_transaction failed: {}",
                                  RdKafka::err2str(commit_err));
@@ -463,7 +477,7 @@ void AlertProducer::flushLoopImpl(
         try {
             if (has_transaction) {
                 RdKafka::ErrorCode begin_err =
-                    producer_->begin_transaction();
+                    errorToCode(producer_->begin_transaction());
                 if (begin_err != RdKafka::ERR_NO_ERROR) {
                     SPDLOG_ERROR(
                         "AlertProducer shutdown drain: begin_transaction failed: {}",
@@ -511,9 +525,10 @@ void AlertProducer::flushLoopImpl(
                     RdKafka::ConsumerGroupMetadata* group_metadata =
                         group_metadata_provider ? group_metadata_provider() : nullptr;
                     if (group_metadata) {
+                        std::vector<RdKafka::TopicPartition*> offsets;
                         RdKafka::ErrorCode offset_err =
-                            producer_->send_offsets_to_transaction(
-                                group_metadata, 30'000);
+                            errorToCode(producer_->send_offsets_to_transaction(
+                                offsets, group_metadata, 30'000));
                         if (offset_err != RdKafka::ERR_NO_ERROR) {
                             SPDLOG_ERROR(
                                 "AlertProducer shutdown drain: "
@@ -525,7 +540,7 @@ void AlertProducer::flushLoopImpl(
                     }
 
                     RdKafka::ErrorCode commit_err =
-                        producer_->commit_transaction(30'000);
+                        errorToCode(producer_->commit_transaction(30'000));
                     if (commit_err != RdKafka::ERR_NO_ERROR) {
                         SPDLOG_ERROR(
                             "AlertProducer shutdown drain: "

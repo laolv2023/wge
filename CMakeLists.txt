@@ -81,7 +81,7 @@ target_include_directories(wge_kafka_detector_core PUBLIC
 )
 target_link_libraries(wge_kafka_detector_core PUBLIC
     wge::wge
-    RdKafka::rdkafka
+    RdKafka::rdkafka++
     protobuf::libprotobuf
     simdjson::simdjson
     re2::re2
