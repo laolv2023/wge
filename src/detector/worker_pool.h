@@ -152,8 +152,8 @@ public:
     /**
      * @brief 设置告警保护参数 (从配置文件加载)
      * @param host_map  Host → CollectionID 兜底映射
-     * @param rate_limit  IP 限流阈值 (每分钟)
-     * @param filter_low  是否丢弃 LOW/RateLimit 告警
+     * @param rate_limit_per_minute  IP 限流阈值 (每分钟)
+     * @param filter_low_severity  是否丢弃 LOW/RateLimit 告警
      */
     void setAlertGuardConfig(
         const std::unordered_map<std::string, int32_t>& host_map,

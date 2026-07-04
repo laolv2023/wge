@@ -310,9 +310,13 @@ void parseDetector(DetectorConfig& cfg, const YAML::Node& node) {
     if (node["host_collection_map"] && node["host_collection_map"].IsMap()) {
         const auto& hcm = node["host_collection_map"];
         for (const auto& kv : hcm) {
-            std::string host = kv.first.as<std::string>();
-            int32_t col_id = kv.second.as<int32_t>();
-            cfg.host_collection_map[host] = col_id;
+            try {
+                std::string host = kv.first.as<std::string>();
+                int32_t col_id = kv.second.as<int32_t>();
+                cfg.host_collection_map[host] = col_id;
+            } catch (const YAML::BadConversion& e) {
+                SPDLOG_WARN("config_loader: skipping invalid host_collection_map entry: {}", e.what());
+            }
         }
     }
 }
