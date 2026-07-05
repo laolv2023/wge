@@ -3,20 +3,18 @@
  * @brief LogMapper 实现 — 日志格式映射引擎
  *
  * ## 模块职责
- * LogMapper 是整个数据管道的入口映射层，负责将原始 Kafka 消息（JSON/Regex/Grok/Protobuf）
+ * LogMapper 是整个数据管道的入口映射层，负责将原始 Kafka 消息（JSON/Protobuf/AktoProtobuf）
  * 解析并转换为统一的 HttpAccessEvent protobuf 结构，供下游 WGE 检测引擎使用。
  *
  * ## 核心流程
  * ```
  * raw_payload (Kafka message bytes)
  *   │
- *   ├─ [Format::Json] ──→ JsonMapper::extract()      → extracted_fields (map)
- *   ├─ [Format::Regex] ─→ RegexMapper::extract()     → extracted_fields (map)
- *   ├─ [Format::Grok] ──→ RegexMapper::extractGrok() → extracted_fields (map)
- *   └─ [Format::Protobuf] ──→ 直接 ParseFromArray()
+ *   ├─ [Format::Json] ──────────→ JsonMapper::extract()  → extracted_fields (map)
+ *   ├─ [Format::Protobuf] ──────→ 直接 ParseFromArray()
+ *   └─ [Format::AktoProtobuf] ──→ 直接 ParseFromArray() (Akto HttpResponseParam)
  *   │
  *   ├─ FieldApplier::applyFields() → 将字段写入 HttpAccessEvent
- *   ├─ 时间戳解析 (Regex/Grok 格式)
  *   └─ 常量字段注入
  *   │
  *   └─→ HttpAccessEvent (标准 protobuf)
@@ -25,9 +23,13 @@
  * ## 设计模式
  * - **Pimpl (Pointer to Implementation)**: 使用 Impl 结构体隐藏映射器依赖，
  *   减小头文件包含范围，加快编译速度
- * - **策略模式**: 根据 Format 枚举选择不同的提取策略（JsonMapper / RegexMapper / 直接反序列化）
+ * - **策略模式**: 根据 Format 枚举选择不同的提取策略（JsonMapper / 直接反序列化）
  * - **std::expected 错误处理**: 所有映射操作返回 expected<T, string>，
  *   调用方可选择处理或传播错误
+ *
+ * ## 注意
+ * Regex 和 Grok 格式已移除，不再支持。若配置指定这两种格式，
+ * LogMapper 构造函数将抛出异常。
  */
 
 #include "mapper/mapper.h"
@@ -39,7 +41,6 @@
 #include "akto_message.pb.h"
 #include "mapper/field_applier.h"
 #include "mapper/json_mapper.h"
-#include "mapper/regex_mapper.h"
 #include "spdlog/spdlog.h"
 
 namespace wge::kafka::mapper {
@@ -53,7 +54,6 @@ struct LogMapper::Impl {
 
     // 具体映射器按需持有（根据 format 决定初始化哪个）
     std::unique_ptr<JsonMapper> json_mapper;      ///< JSON 格式提取器
-    std::unique_ptr<RegexMapper> regex_mapper;    ///< Regex/Grok 格式提取器
     std::unique_ptr<FieldApplier> field_applier;  ///< 字段写入器（始终需要）
 
     explicit Impl(const MapperConfig& cfg)
@@ -77,28 +77,10 @@ LogMapper::LogMapper(const MapperConfig& config)
             break;
 
         case Format::Regex:
-            impl_->regex_mapper = std::make_unique<RegexMapper>();
-            // 预编译正则模式：构造时编译失败则直接抛异常，快速失败
-            if (!config_.regex_pattern.empty()) {
-                auto compile_result =
-                    impl_->regex_mapper->compile(config_.regex_pattern);
-                if (!compile_result) {
-                    throw std::runtime_error(
-                        std::string("LogMapper: failed to compile regex '") +
-                        config_.regex_pattern +
-                        "': " + compile_result.error());
-                } else {
-                    spdlog::debug("LogMapper: compiled regex '{}'",
-                                  config_.regex_pattern);
-                }
-            }
-            break;
-
         case Format::Grok:
-            // Grok 最终转换为 Regex 后再匹配，复用 RegexMapper
-            impl_->regex_mapper = std::make_unique<RegexMapper>();
-            spdlog::debug("LogMapper: initialized RegexMapper for Grok");
-            break;
+            throw std::runtime_error(
+                std::string("LogMapper: Regex/Grok format not supported. ") +
+                "Use format 'json' or 'protobuf' instead.");
 
         case Format::Protobuf:
             // Protobuf 无需额外映射器，直接反序列化即可
@@ -153,38 +135,11 @@ std::expected<std::shared_ptr<HttpAccessEvent>, std::string> LogMapper::map(
             break;
         }
 
-        case Format::Regex: {
-            if (!impl_->regex_mapper) {
-                return std::unexpected(
-                    std::string("RegexMapper not initialized"));
-            }
-            auto fields_result = impl_->regex_mapper->extract(
-                raw_payload, config_.regex_pattern, config_.field_mappings);
-            if (!fields_result) {
-                return std::unexpected(
-                    std::string("RegexMapper::extract failed: ") +
-                    fields_result.error());
-            }
-            extracted_fields = std::move(*fields_result);
-            break;
-        }
-
-        case Format::Grok: {
-            if (!impl_->regex_mapper) {
-                return std::unexpected(
-                    std::string("RegexMapper not initialized (Grok)"));
-            }
-            auto fields_result = impl_->regex_mapper->extractGrok(
-                raw_payload, config_.grok_pattern,
-                config_.grok_custom_patterns, config_.field_mappings);
-            if (!fields_result) {
-                return std::unexpected(
-                    std::string("RegexMapper::extractGrok failed: ") +
-                    fields_result.error());
-            }
-            extracted_fields = std::move(*fields_result);
-            break;
-        }
+        case Format::Regex:
+        case Format::Grok:
+            return std::unexpected(
+                std::string("LogMapper::map: Regex/Grok format not supported. ")
+                + "Use format 'json' or 'protobuf' instead.");
 
         case Format::Protobuf: {
             // Protobuf 直接反序列化，无需字段提取步骤
@@ -298,24 +253,7 @@ std::expected<std::shared_ptr<HttpAccessEvent>, std::string> LogMapper::map(
     // FieldApplier 通过 protobuf 反射将 map 中的 field_name → value 设置到对应字段
     impl_->field_applier->applyFields(extracted_fields, *event, config_.field_mappings);
 
-    // ===== 步骤 3: 时间戳解析（Regex/Grok 需要额外步骤）=====
-    // JSON/Protobuf 格式中时间戳已是数字毫秒，无需额外解析
-    if (config_.format == Format::Regex || config_.format == Format::Grok) {
-        const auto& ts_cfg = config_.timestamp_config;
-        auto it = extracted_fields.find(ts_cfg.source_field);
-        if (it != extracted_fields.end()) {
-            int64_t ts_ms = impl_->field_applier->parseTimestamp(
-                it->second, ts_cfg.formats);
-            if (ts_ms >= 0) {
-                event->set_timestamp_ms(ts_ms);
-            } else {
-                spdlog::warn("Failed to parse timestamp from field '{}'='{}'",
-                             ts_cfg.source_field, it->second);
-            }
-        }
-    }
-
-    // ===== 步骤 4: 应用常量字段 =====
+    // ===== 步骤 3: 应用常量字段 =====
     // 常量字段不受源数据影响，始终写入固定值
     // 如 collector_id、environment 等
     for (const auto& cf : config_.constant_fields) {
