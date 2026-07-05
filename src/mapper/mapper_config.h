@@ -5,7 +5,7 @@
  * @brief 日志映射配置结构体定义
  *
  * 定义 log_mapping.yaml 对应的 MapperConfig 结构体。
- * 描述如何将原始日志（JSON / Regex / Protobuf / Grok）的字段
+ * 描述如何将原始日志（JSON / Protobuf / AktoProtobuf）的字段
  * 映射到 HttpAccessEvent protobuf 消息的各个字段。
  *
  * 线程安全: MapperConfig 在初始化后不可变，读取操作线程安全。
@@ -152,29 +152,6 @@ struct HeaderExtractionConfig {
 };
 
 /**
- * @brief Regex/Grok 模式的 timestamp 解析配置
- */
-struct TimestampConfig {
-    /// @brief 包含 timestamp 的捕获组名
-    std::string source_field{"timestamp"};
-
-    /// @brief 目标字段名 (timestamp_ms 或自定义)
-    std::string target_field{"timestamp_ms"};
-
-    /// @brief 尝试的时间格式列表，按优先级排列
-    ///        空表示自动尝试以下所有格式:
-    ///        1. ISO 8601: "2006-01-02T15:04:05Z07:00"
-    ///        2. Nginx: "02/Jan/2006:15:04:05 -0700"
-    ///        3. Simple: "2006-01-02 15:04:05"
-    ///        4. Unix epoch seconds
-    ///        5. Unix epoch milliseconds
-    std::vector<std::string> formats{};
-
-    /// @brief 时区。空表示 UTC
-    std::string timezone{"UTC"};
-};
-
-/**
  * @brief 全部映射配置
  *
  * 对应于 log_mapping.yaml 文件内容。
@@ -198,17 +175,8 @@ struct MapperConfig {
     /// @brief 响应 header 提取配置
     HeaderExtractionConfig response_headers{};
 
-    /// @brief Regex/Grok 模式下的时间戳解析配置
-    TimestampConfig timestamp_config{};
-
-    /// @brief Regex 模式用的正则表达式字符串
-    std::string regex_pattern{};
-
-    /// @brief Grok 模式用的 Grok 表达式字符串
-    std::string grok_pattern{};
-
-    /// @brief Grok 自定义模式定义 (模式名 -> 正则子表达式)
-    std::map<std::string, std::string> grok_custom_patterns{};
+    // Regex/Grok 相关字段（timestamp_config, regex_pattern, grok_pattern,
+    // grok_custom_patterns）已随格式支持移除
 
     // =========================================================================
     // 静态工厂方法
