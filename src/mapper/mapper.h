@@ -63,10 +63,10 @@ public:
      * @brief 将原始日志 payload 映射为 HttpAccessEvent
      *
      * 根据 config_.format 自动分发到正确的解析器:
-     * - Format::Json     → JsonMapper
-     * - Format::Regex    → RegexMapper
-     * - Format::Grok     → RegexMapper (Grok 转换为 Regex)
-     * - Format::Protobuf → 直接反序列化 Protobuf
+     * - Format::Json         → JsonMapper
+     * - Format::Protobuf     → 直接反序列化 Protobuf
+     * - Format::AktoProtobuf → 直接反序列化 Akto HttpResponseParam
+     * Regex/Grok 格式已移除，不再支持。
      *
      * @param raw_payload 原始日志字符串
      * @return std::expected<std::shared_ptr<HttpAccessEvent>, std::string>
