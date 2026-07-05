@@ -29,14 +29,23 @@ std::expected<Format, std::string> parseFormat(std::string_view str) {
 
     if (lower == "protobuf") return Format::Protobuf;
     if (lower == "json") return Format::Json;
-    if (lower == "regex") return Format::Regex;
-    if (lower == "grok") return Format::Grok;
+    // Regex 和 Grok 格式已移除，不再支持
+    if (lower == "regex") {
+        return std::unexpected(
+            std::string("Format 'regex' is no longer supported. ")
+            + "Use 'json' or 'protobuf' instead.");
+    }
+    if (lower == "grok") {
+        return std::unexpected(
+            std::string("Format 'grok' is no longer supported. ")
+            + "Use 'json' or 'protobuf' instead.");
+    }
     if (lower == "akto_protobuf" || lower == "akto-protobuf" || lower == "akto")
         return Format::AktoProtobuf;
 
     return std::unexpected(
         std::string("Unknown format: '") + std::string(str) +
-        "'. Expected one of: protobuf, json, regex, grok, akto_protobuf");
+        "'. Expected one of: protobuf, json, akto_protobuf");
 }
 
 const char* formatToString(Format fmt) noexcept {
@@ -124,29 +133,6 @@ std::expected<void, std::string> parseHeaderExtraction(const YAML::Node& node,
         cfg.normalize_keys = node["normalize_keys"].as<bool>();
     }
     return {};
-}
-
-/**
- * @brief 解析 TimestampConfig 从 YAML
- */
-void parseTimestampConfig(const YAML::Node& node, TimestampConfig& cfg) {
-    if (!node) return;
-
-    if (node["source_field"]) {
-        cfg.source_field = node["source_field"].as<std::string>();
-    }
-    if (node["target_field"]) {
-        cfg.target_field = node["target_field"].as<std::string>();
-    }
-    if (node["formats"] && node["formats"].IsSequence()) {
-        cfg.formats.clear();
-        for (const auto& fmt : node["formats"]) {
-            cfg.formats.emplace_back(fmt.as<std::string>());
-        }
-    }
-    if (node["timezone"]) {
-        cfg.timezone = node["timezone"].as<std::string>();
-    }
 }
 
 /**
@@ -247,32 +233,7 @@ std::expected<MapperConfig, std::string> MapperConfig::loadFromFile(
         if (!fmt_result) return std::unexpected(fmt_result.error());
         config.format = *fmt_result;
 
-        // 解析 regex_pattern（regex 格式必填）
-        if (config.format == Format::Regex) {
-            if (!root["regex_pattern"]) {
-                return std::unexpected(
-                    "Regex format requires 'regex_pattern' field in: " +
-                    path);
-            }
-            config.regex_pattern = root["regex_pattern"].as<std::string>();
-        }
-
-        // 解析 grok_pattern（grok 格式必填）
-        if (config.format == Format::Grok) {
-            if (!root["grok_pattern"]) {
-                return std::unexpected(
-                    "Grok format requires 'grok_pattern' field in: " + path);
-            }
-            config.grok_pattern = root["grok_pattern"].as<std::string>();
-
-            // 自定义 grok 模式
-            if (root["grok_custom_patterns"]) {
-                for (const auto& kv : root["grok_custom_patterns"]) {
-                    config.grok_custom_patterns[kv.first.as<std::string>()] =
-                        kv.second.as<std::string>();
-                }
-            }
-        }
+        // Regex 和 Grok 格式已在 parseFormat 中拒绝，此处不再需要解析 regex_pattern/grok_pattern
 
         // 解析 field_mappings
         if (root["field_mappings"] && root["field_mappings"].IsSequence()) {
@@ -306,10 +267,7 @@ std::expected<MapperConfig, std::string> MapperConfig::loadFromFile(
             if (!resp_result) return std::unexpected(resp_result.error());
         }
 
-        // 解析 timestamp_config
-        if (root["timestamp"]) {
-            parseTimestampConfig(root["timestamp"], config.timestamp_config);
-        }
+        // timestamp_config 仅用于 Regex/Grok，已随格式移除
 
     } catch (const YAML::Exception& e) {
         return std::unexpected(
