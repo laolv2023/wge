@@ -16,7 +16,7 @@ find_package(wge REQUIRED)
 find_package(RdKafka REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(simdjson REQUIRED)
-find_package(re2 REQUIRED)
+# RE2 依赖已随 RegexMapper 移除
 find_package(yaml-cpp REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(prometheus-cpp QUIET)
@@ -38,6 +38,10 @@ add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-g -O0 -fsanitize=address,undefined)
     add_link_options(-fsanitize=address,undefined)
+else()
+    # Release: 安全加固编译选项
+    add_compile_options(-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE)
+    add_link_options(-Wl,-z,relro -Wl,-z,now -pie)
 endif()
 
 # ===== Core library =====
@@ -49,7 +53,6 @@ set(CORE_SOURCES
     src/mapper/mapper_config.h src/mapper/mapper_config.cc
     src/mapper/mapper.h src/mapper/mapper.cc
     src/mapper/json_mapper.h src/mapper/json_mapper.cc
-    src/mapper/regex_mapper.h src/mapper/regex_mapper.cc
     src/mapper/field_applier.h src/mapper/field_applier.cc
     # Kafka
     src/kafka/consumer.h src/kafka/consumer.cc
@@ -86,7 +89,7 @@ target_link_libraries(wge_kafka_detector_core PUBLIC
     RdKafka::rdkafka++
     protobuf::libprotobuf
     simdjson::simdjson
-    re2::re2
+    # RE2 已随 RegexMapper 移除
     yaml-cpp
     spdlog::spdlog
     # WGE SDK 依赖库
@@ -116,7 +119,6 @@ if(WGE_DETECTOR_ENABLE_TESTS AND GTest_FOUND)
     enable_testing()
     set(TEST_SOURCES
         test/unit/test_json_mapper.cc
-        test/unit/test_regex_mapper.cc
         test/unit/test_field_applier.cc
         test/unit/test_extractor_adapter.cc
         test/unit/test_alert_builder.cc
